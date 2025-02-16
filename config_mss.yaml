@@ -1,0 +1,26 @@
+pubmed_config:
+  embeddings_directory: "/root/pubmed_semantic_search/pubmed25_embed_update/"
+  xml_directory: "/root/pubmed_semantic_search/pubmed25_update_xmls/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "/root/pubmed_semantic_search/chunked_pubmed_embeddings/"
+  metadata_path: "/root/pubmed_semantic_search/pubmed_chunked_metadata.json"
+  data_folder: "/root/pubmed_semantic_search/pubmed25_update_df/"
+  chunk_size_bytes: 1073741824  # 1GB in bytes
+
+biorxiv_config:
+  embeddings_directory: "/root/pubmed_semantic_search/biorxiv_embed/"
+  npy_files_pattern: "*.npy"
+  combined_data_file: "/root/pubmed_semantic_search/biorxiv_df/combined_biorxiv_data.parquet"
+  chunk_dir: "/root/pubmed_semantic_search/chunked_biorxiv_embeddings/"
+  metadata_path: "/root/pubmed_semantic_search/biorxiv_chunked_memmap_metadata.json"
+  data_folder: "/root/pubmed_semantic_search/biorxiv_df"
+  chunk_size_bytes: 1073741824
+
+medrxiv_config:
+  embeddings_directory: "/root/pubmed_semantic_search/medarxiv_embed/"
+  npy_files_pattern: "*.npy"
+  combined_data_file: '/root/pubmed_semantic_search/medarxiv_df/database_2024-08-02.parquet'
+  chunk_dir: "/root/pubmed_semantic_search/chunked_medarxiv_embeddings/"
+  metadata_path: "/root/pubmed_semantic_search/medarxiv_chunked_memmap_metadata.json"
+  data_folder: "/root/pubmed_semantic_search/medarxiv_df"
+  chunk_size_bytes: 1073741824

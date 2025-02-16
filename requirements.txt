@@ -1,0 +1,22 @@
+beautifulsoup4
+concurrent.futures
+pandas<2.0
+tqdm
+joblib
+lxml  # For better XML parsing performance (if not already installed with xml.etree)
+html
+unidecode
+streamlit
+plotly
+scikit-learn
+pyarrow
+fastapi
+uvicorn
+sentence-transformers
+umap-pytorch
+crossref
+pyyaml
+requests
+google-generativeai
+torch
+dropbox
