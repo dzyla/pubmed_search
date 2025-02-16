@@ -74,7 +74,10 @@ Then, you can update the database using the following scripts:
 
 ## Examples
 
-**Search Query:** "Investigate the effectiveness of deep brain stimulation for treating Parkinson's disease."
+**Search Query:** `cryo-EM structure of measles virus fusion protein antibody complex` or 
+```
+Filoviruses, including Ebola and Marburg viruses, cause hemorrhagic fevers with up to 90% lethality. The viral nucleocapsid is assembled by polymerization of the nucleoprotein (NP) along the viral genome, together with the viral proteins VP24 and VP35. We employed cryo-electron tomography of cells transfected with viral proteins and infected with model Ebola virus, to illuminate assembly intermediates as well as a 9Å map of the complete intracellular assembly. This structure reveals a previously unresolved, third, and outer layer of NP complexed with VP35. The intrinsically-disordered-region together with the C-terminal domain of this outer layer of NP provides the constant-width between intracellular nucleocapsid bundles and likely functions as a flexible tether to the viral matrix protein in virion. A comparison of intracellular nucleocapsid with prior in-virion nucleocapsid structures reveals the nucleocapsid further condenses vertically in-virion. The interfaces responsible for nucleocapsid assembly are highly conserved and offer targets for broadly effective antivirals.
+```
 
 **Expected Results:** A list of manuscripts related to deep brain stimulation and Parkinson's disease, ranked by their semantic similarity to the query. The app also provides interactive visualizations to explore the relationships between the found manuscripts.
 
