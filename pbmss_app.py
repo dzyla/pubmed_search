@@ -53,6 +53,16 @@ def get_query_embedding(query, normalize=True, precision="ubinary"):
             f"Failed to get query embedding from model server: {response.status_code} {response.text}"
         )
 
+def get_donation_collected():
+    # Open the JSON file in read mode
+    with open('donation_data.json', 'r') as file:
+        data = json.load(file)
+    
+    # Retrieve the 'donation_collected' value; default to 0 if not found
+    donation_value = data.get("donation_collected", 0)
+    
+    # Convert the value to an integer and return it
+    return int(donation_value)
 
 # --- Crossref Helper Functions ---
 
@@ -1101,8 +1111,8 @@ if not final_results.empty:
     for idx, row in sorted_results.iterrows():
         # Compute citation count for display.
         citations = get_citation_count(row["doi"]) if pd.notnull(row["doi"]) else "N/A"
-        # Modify the expander title to include score and citation information.
-        expander_title = f"{idx + 1}. {row['title']}\n\n _(Score: {row['quality']:.2f} | Citations: {citations})_"
+        # Modify the expander title to include date, score and citation information
+        expander_title = f"{idx + 1}\. {row['title']}\n\n _(Score: {row['quality']:.2f} | Date: {row['date']} | Citations: {citations})_"
         doi_link = f"https://doi.org/{row['doi']}" if pd.notnull(row["doi"]) else "#"
         with st.expander(expander_title):
             col_a, col_b, col_c = st.columns(3)
@@ -1288,7 +1298,7 @@ st.markdown(
     <div style='text-align: center;'>
         <b>Developed by <a href="https://www.dzyla.com/" target="_blank">Dawid Zyla</a></b>
         <br>
-        <a href="https://github.com/dzyla/pubmed_search" target="_blank">Source code on GitHub</a>
+        <a href="https://github.com/dzyla/biorxiv_search" target="_blank">Source code on GitHub</a>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1312,7 +1322,7 @@ with c1:
         unsafe_allow_html=True,
     )
 with c2:
-    donation_collected = 0.0
+    donation_collected = get_donation_collected()
     target_amount = 50
     progress_fraction = donation_collected / target_amount
     st.progress(progress_fraction)
