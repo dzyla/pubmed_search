@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Updated PubMed Pipeline (API Version):
 Downloads, extracts, and processes PubMed XML files into Parquet files,
@@ -27,11 +28,39 @@ import numpy as np
 import glob
 import unidecode
 import multiprocessing
+from fastapi import FastAPI
+import uvicorn
+import threading
+import time
+
+# Create FastAPI app.
+app = FastAPI()
+
+@app.get("/status")
+def status():
+    return {"status": "running"}
+
+# Global variable to hold the server instance.
+global_server = None
+
+def run_server():
+    global global_server
+    print("Starting FastAPI status server on port 8001...")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8001, log_level="info")
+    server = uvicorn.Server(config)
+    global_server = server
+    server.run()
+    print("FastAPI status server has stopped.")
+
+# Start the server in a separate thread.
+server_thread = threading.Thread(target=run_server)
+server_thread.start()
+
 
 ###############################
 # Load Configuration from YAML
 ###############################
-CONFIG_FILE = "/root/pubmed_search/config_mss.yaml"
+CONFIG_FILE = "config_mss.yaml"
 try:
     with open(CONFIG_FILE, "r") as stream:
         CONFIG = yaml.safe_load(stream)
@@ -409,6 +438,10 @@ def main_api_embeddings(input_directory):
 # Main Entry Point
 ###############################
 def main():
+    
+    # Set the flag to indicate update is in progress.
+    update_in_progress = True
+    
     """
     Execute the complete pipeline:
       1. Download and extract XML files.
@@ -431,3 +464,12 @@ if __name__ == "__main__":
     # In this API version, we use sequential embedding processing.
     main()
     print("Pipeline completed successfully.")
+    
+    # Signal the server to shut down.
+    if global_server is not None:
+        print("Signaling FastAPI status server to shut down...")
+        global_server.should_exit = True
+
+    # Wait for the server thread to finish.
+    server_thread.join()
+    print("Server has shut down.")

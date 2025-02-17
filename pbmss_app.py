@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
+from sympy import N
 from tqdm import tqdm
 import torch
 import pyarrow as pa
@@ -21,6 +22,7 @@ from sklearn.metrics.pairwise import cosine_similarity, pairwise_distances
 from sklearn.manifold import MDS
 import yaml
 import google.genai as genai
+import streamlit.components.v1 as components
 
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.quantization import semantic_search_faiss
@@ -28,6 +30,79 @@ from umap_pytorch import load_pumap
 
 # Import Crossref Works for citation lookup
 from crossref.restful import Works
+
+# user statistics
+import uuid
+import streamlit as st
+import sqlite3
+
+# -----------------------------------------------------------------------------
+# Use it to check number of active users
+# -----------------------------------------------------------------------------
+def get_current_active_users(db_path: str = "sessions_history.db", timeout: int = 300) -> tuple:
+    """
+    Inserts a record of the current user's connection into a SQLite database.
+    The database keeps a complete history of all connection events.
+    The function then returns:
+      - The count of distinct session_ids whose most recent connection (last_seen)
+        is within the last 'timeout' seconds.
+      - The current time in the format YYYY-MM-DD-HH-mm-ss.
+    
+    Args:
+        db_path (str): Path to the SQLite database file (default: "sessions_history.db").
+        timeout (int): Time in seconds after which a session is considered inactive (default: 300 seconds).
+    
+    Returns:
+        tuple: (active_count, formatted_current_time)
+               active_count (int): The number of active sessions (users) currently active.
+               formatted_current_time (str): Current time formatted as YYYY-MM-DD-HH-mm-ss.
+    """
+    # Ensure the current user has a unique session ID stored in st.session_state.
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    session_id = st.session_state.session_id
+    current_time = int(time.time())
+    formatted_time = datetime.fromtimestamp(current_time).strftime("%Y-%m-%d-%H-%M-%S")
+    
+    # Connect to the SQLite database (creates the file if it doesn't exist).
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Create a table for session history if it doesn't exist.
+    # This table will record every connection event.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            last_seen INTEGER
+        )
+    """)
+    conn.commit()
+    
+    # Insert a new record for this session update.
+    cursor.execute("""
+        INSERT INTO session_history (session_id, last_seen)
+        VALUES (?, ?)
+    """, (session_id, current_time))
+    conn.commit()
+    
+    # Compute the expiration threshold.
+    expiration_time = current_time - timeout
+    
+    # For each session, find its most recent last_seen.
+    # Then count those sessions with a most recent last_seen >= expiration_time.
+    cursor.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT session_id, MAX(last_seen) AS last_seen
+            FROM session_history
+            GROUP BY session_id
+            HAVING last_seen >= ?
+        ) AS active_sessions
+    """, (expiration_time,))
+    active_count = cursor.fetchone()[0]
+    
+    conn.close()
+    return active_count
 
 ###############################################################################
 # Global settings and helper function to call the REST API for model encoding
@@ -63,6 +138,17 @@ def get_donation_collected():
     
     # Convert the value to an integer and return it
     return int(donation_value)
+
+def check_update_status():
+    try:
+        response = requests.get("http://localhost:8001/status", timeout=1)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "running":
+                return True
+    except Exception:
+        return None
+    return None
 
 # --- Crossref Helper Functions ---
 
@@ -897,7 +983,7 @@ def define_style():
                 padding-top: 10px;
             }
             a {
-                color: #FF4B4B;
+                color: #26557b;
                 text-decoration: none;
             }
         </style>
@@ -907,6 +993,9 @@ def define_style():
 
 
 def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med):
+    #components.html(js_code, height=0, width=0)
+    active_users = get_current_active_users()
+    
     biorxiv_logo = (
         "https://www.biorxiv.org/sites/default/files/biorxiv_logo_homepage.png"
     )
@@ -926,7 +1015,7 @@ def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med):
             <div style="text-align: center; margin-top: 10px;">
                 <h3 style="color: black; margin: 0; font-weight: 400;">Manuscript Semantic Search [MSS]</h3>
                 <p style="font-size: 14px; color: #555; margin: 5px 0 0 0;">
-                    Last database update: {db_update_date}<br>
+                    Last database update: {db_update_date} | Active users: <b>{active_users}</b><br>
                     Database size: PubMed: {int(db_size_pubmed):,} entries / BioRxiv: {int(db_size_bio):,} / MedRxiv: {int(db_size_med):,}
                 </p>
             </div>
@@ -1030,6 +1119,15 @@ except:
 
 logo(last_biorxiv_date, biorxiv_db_size, pubmed_db_size, medrxiv_db_size)
 
+
+# -----------------------------------------------------------------------------
+# Check update status.
+# -----------------------------------------------------------------------------
+status = check_update_status()
+
+if status:
+    st.info("Database update in progress. Search might be slow...")
+
 # -----------------------------------------------------------------------------
 # Form and search input.
 # -----------------------------------------------------------------------------
@@ -1057,6 +1155,7 @@ with st.form("search_form"):
 
 STATUS = st.empty()
 col1, col2 = st.columns(2)
+ncol1, ncol2 = st.columns(2)
 use_ai = col1.checkbox("Use AI generated summary?", key="use_ai_checkbox")
 
 if submitted and query:
