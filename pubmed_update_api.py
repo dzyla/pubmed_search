@@ -6,11 +6,12 @@ and then generates embeddings by sending requests to an external API.
 The abstract extraction has been updated to combine all AbstractText fields,
 and the publication date extraction now considers PubDate, ArticleDate,
 DateCompleted, and DateRevised.
-Configuration values (such as directories) are loaded from config_mss.yaml.
+Configuration values (such as directories) are loaded from config_mss_new_pubmed.yaml.
 """
 
 import os
 import re
+import sys
 import requests
 import gzip
 import shutil
@@ -32,13 +33,21 @@ from fastapi import FastAPI
 import uvicorn
 import threading
 import time
+import asyncio
+
+# Global flag to indicate update is in progress.
+update_in_progress = True
+MAX_WORKERS = 4
 
 # Create FastAPI app.
 app = FastAPI()
 
 @app.get("/status")
 def status():
-    return {"status": "running"}
+    if update_in_progress:
+        return {"status": "update running"}
+    else:
+        return {"status": "update completed"}
 
 # Global variable to hold the server instance.
 global_server = None
@@ -49,18 +58,33 @@ def run_server():
     config = uvicorn.Config(app, host="0.0.0.0", port=8001, log_level="info")
     server = uvicorn.Server(config)
     global_server = server
-    server.run()
+    # Create and set a new event loop for this thread.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.serve())
     print("FastAPI status server has stopped.")
 
 # Start the server in a separate thread.
 server_thread = threading.Thread(target=run_server)
 server_thread.start()
 
+#########################################
+# Shutdown helper to gracefully exit.
+#########################################
+def shutdown_pipeline():
+    global global_server, update_in_progress
+    print("Exceeded 15 minutes of FTP retries. Shutting down pipeline and FastAPI server.")
+    update_in_progress = False
+    if global_server is not None:
+        global_server.should_exit = True
+    # Ensure the server thread is stopped.
+    server_thread.join()
+    sys.exit(1)
 
 ###############################
 # Load Configuration from YAML
 ###############################
-CONFIG_FILE = "config_mss.yaml"
+CONFIG_FILE = "config_mss_new_pubmed.yaml"
 try:
     with open(CONFIG_FILE, "r") as stream:
         CONFIG = yaml.safe_load(stream)
@@ -77,6 +101,8 @@ DEST_DF_FOLDER    = PUBMED_CONFIG.get("data_folder", "pubmed25_update_df")
 DEST_EMBED_FOLDER = PUBMED_CONFIG.get("embeddings_directory", "pubmed25_embed_update")
 # (The original GPU lock folder is no longer used in the API version.)
 GPU_LOCK_FOLDER   = "gpu_locks"  
+
+print("Config: XML:", DEST_XML_FOLDER, "Data:", DEST_DF_FOLDER, "Embeddings:", DEST_EMBED_FOLDER)
 
 ###############################
 # Utility Functions and Global Helpers
@@ -114,6 +140,8 @@ def download_and_extract(file_name, base_url, destination_folder):
     Download the gzipped XML file from the given URL if no file with the same stem exists.
     Checks for an existing XML, Parquet, or npy file with the same stem.
     After download, extracts the gzipped file into an XML file in the destination folder.
+    Implements a retry mechanism. If the retry period exceeds 15 minutes,
+    the pipeline and FastAPI server are shut down.
     """
     base_stem = file_name[:-3]  # Remove '.gz'
     xml_file_name = os.path.join(destination_folder, base_stem)
@@ -127,8 +155,22 @@ def download_and_extract(file_name, base_url, destination_folder):
 
     full_url = urljoin(base_url, file_name)
     print(f"Downloading {file_name}...")
-    response = requests.get(full_url, stream=True)
-    response.raise_for_status()
+    
+    # Start timer for FTP retry attempts.
+    start_time = time.time()
+    while True:
+        try:
+            # Set a reasonable timeout for each request attempt.
+            response = requests.get(full_url, stream=True, timeout=30)
+            response.raise_for_status()
+            break
+        except Exception as e:
+            elapsed = time.time() - start_time
+            if elapsed > 900:  # 15 minutes = 900 seconds.
+                shutdown_pipeline()
+            else:
+                print(f"Error downloading {file_name}: {e}. Retrying in 30 seconds...")
+                time.sleep(30)
     
     with open(file_name, 'wb') as f_out:
         shutil.copyfileobj(response.raw, f_out)
@@ -147,7 +189,7 @@ def get_file_list(url):
     soup = BeautifulSoup(response.text, 'html.parser')
     return [link.get('href') for link in soup.find_all('a', href=re.compile(r'.*\.xml\.gz$'))]
 
-def download_all_xmls():
+def download_all_xmls(limit=None, shuffle=False):
     """
     Download XML files from the server if not already present locally.
     """
@@ -160,7 +202,12 @@ def download_all_xmls():
 
     print(f"Found {len(all_files)} files to check. Base: {len(base_files)}, Update: {len(updated_files_list)}")
     
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    if limit is not None:
+        if shuffle:
+            np.random.shuffle(all_files)
+        all_files = all_files[:limit]
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         for file in all_files:
             url_to_use = base_url if file in base_files else updated_files_url
@@ -194,164 +241,270 @@ def parse_date(year, month, day):
     day = '01' if day is None or not day.strip().isdigit() else day.strip().zfill(2)
     return datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").strftime("%Y-%m-%d")
 
-def get_custom_publication_date(article):
-    """
-    Extract the publication date from an article element.
-    In order of preference:
-      1. JournalIssue PubDate (standard)
-      2. ArticleDate (with DateType="Electronic")
-      3. DateCompleted
-      4. DateRevised
-      5. Fallback to PubMedPubDate statuses.
-    """
-    # 1. Try standard PubDate inside JournalIssue
-    pub_date = article.find('.//Journal/JournalIssue/PubDate')
-    if pub_date is not None:
-        year = pub_date.findtext('Year')
-        month = pub_date.findtext('Month')
-        day = pub_date.findtext('Day')
-        if year and year.strip():
-            try:
-                return parse_date(year, month, day)
-            except Exception:
-                pass
+def get_custom_publication_date(article):  
+    """  
+    Extract the publication date from an article element.  
+    Returns at least a year (YYYY) if available, or a complete date (YYYY-MM-DD) when possible.  
+    Never returns None if any year information is available.  
 
-    # 2. Try ArticleDate with DateType Electronic
-    article_date = article.find('.//ArticleDate[@DateType="Electronic"]')
-    if article_date is not None:
-        year = article_date.findtext('Year')
-        month = article_date.findtext('Month')
-        day = article_date.findtext('Day')
-        if year and year.strip():
-            try:
-                return parse_date(year, month, day)
-            except Exception:
-                pass
+    In order of preference:  
+      1. JournalIssue PubDate (standard)  
+      2. ArticleDate (with DateType="Electronic")  
+      3. DateCompleted  
+      4. DateRevised  
+      5. Fallback to PubMedPubDate statuses.  
+    """  
+    best_year = None  
 
-    # 3. Try DateCompleted
-    date_completed = article.find('.//DateCompleted')
-    if date_completed is not None:
-        year = date_completed.findtext('Year')
-        month = date_completed.findtext('Month')
-        day = date_completed.findtext('Day')
-        if year and year.strip():
-            try:
-                return parse_date(year, month, day)
-            except Exception:
-                pass
+    pub_date = article.find('.//Journal/JournalIssue/PubDate')  
+    if pub_date is not None:  
+        year = pub_date.findtext('Year')  
+        if year and year.strip() and year.strip().isdigit():  
+            best_year = year.strip()  
+            month = pub_date.findtext('Month')  
+            day = pub_date.findtext('Day')  
+            try:  
+                return parse_date(year, month, day)  
+            except Exception:  
+                pass  
 
-    # 4. Try DateRevised
-    date_revised = article.find('.//DateRevised')
-    if date_revised is not None:
-        year = date_revised.findtext('Year')
-        month = date_revised.findtext('Month')
-        day = date_revised.findtext('Day')
-        if year and year.strip():
-            try:
-                return parse_date(year, month, day)
-            except Exception:
-                pass
+    article_date = article.find('.//ArticleDate[@DateType="Electronic"]')  
+    if article_date is not None:  
+        year = article_date.findtext('Year')  
+        if year and year.strip() and year.strip().isdigit():  
+            best_year = best_year or year.strip()  
+            month = article_date.findtext('Month')  
+            day = article_date.findtext('Day')  
+            try:  
+                return parse_date(year, month, day)  
+            except Exception:  
+                pass  
 
-    # 5. Fallback: use PubMedPubDate statuses
-    pub_status_priority = ['accepted', 'epublish', 'aheadofprint', 'ppublish',
-                           'ecollection', 'revised', 'received']
-    pubmed_dates = article.findall('.//PubmedData/History/PubMedPubDate')
-    dates_by_status = {status: None for status in pub_status_priority}
-    for pub_date in pubmed_dates:
-        pub_status = pub_date.get('PubStatus')
-        if pub_status in pub_status_priority:
-            year = pub_date.findtext('Year')
-            month = pub_date.findtext('Month')
-            day = pub_date.findtext('Day')
-            if year and year.strip():
-                try:
-                    complete_date = parse_date(year, month, day)
-                    dates_by_status[pub_status] = complete_date
-                except Exception:
-                    continue
-    for status in pub_status_priority:
-        if dates_by_status[status]:
-            return dates_by_status[status]
+    date_completed = article.find('.//DateCompleted')  
+    if date_completed is not None:  
+        year = date_completed.findtext('Year')  
+        if year and year.strip() and year.strip().isdigit():  
+            best_year = best_year or year.strip()  
+            month = date_completed.findtext('Month')  
+            day = date_completed.findtext('Day')  
+            try:  
+                return parse_date(year, month, day)  
+            except Exception:  
+                pass  
+
+    date_revised = article.find('.//DateRevised')  
+    if date_revised is not None:  
+        year = date_revised.findtext('Year')  
+        if year and year.strip() and year.strip().isdigit():  
+            best_year = best_year or year.strip()  
+            month = date_revised.findtext('Month')  
+            day = date_revised.findtext('Day')  
+            try:  
+                return parse_date(year, month, day)  
+            except Exception:  
+                pass  
+
+    pub_status_priority = ['accepted', 'epublish', 'aheadofprint', 'ppublish',  
+                           'ecollection', 'revised', 'received']  
+    pubmed_dates = article.findall('.//PubmedData/History/PubMedPubDate')  
+    dates_by_status = {status: None for status in pub_status_priority}  
+
+    for pub_date in pubmed_dates:  
+        pub_status = pub_date.get('PubStatus')  
+        if pub_status in pub_status_priority:  
+            year = pub_date.findtext('Year')  
+            if year and year.strip() and year.strip().isdigit():  
+                best_year = best_year or year.strip()  
+                month = pub_date.findtext('Month')  
+                day = pub_date.findtext('Day')  
+                try:  
+                    complete_date = parse_date(year, month, day)  
+                    dates_by_status[pub_status] = complete_date  
+                except Exception:  
+                    continue  
+
+    for status in pub_status_priority:  
+        if dates_by_status[status]:  
+            return dates_by_status[status]  
+
+    medline_date = article.find('.//MedlineDate')  
+    if medline_date is not None and medline_date.text:  
+        year_match = re.search(r'\b(19|20)\d{2}\b', medline_date.text)  
+        if year_match:  
+            best_year = best_year or year_match.group(0)  
+
+    if best_year:  
+        return best_year  
+
     return None
 
-def process_xml_file(filename):
-    """
-    Process an XML file and extract article metadata into a DataFrame.
-    The abstract is constructed by concatenating all AbstractText elements.
-    If an AbstractText element has a 'Label', it is prefixed to its text.
-    """
-    try:
-        tree = ET.parse(filename)
-        root = tree.getroot()
-        articles_data = []
-        for article in root.findall('.//PubmedArticle'):
-            doi = format_text(article.findtext(".//ArticleId[@IdType='doi']"))
-            title = format_text(article.findtext('.//ArticleTitle'))
-            
-            # Extract authors individually.
-            authors = []
-            for auth in article.findall('.//AuthorList/Author'):
-                name_parts = []
-                for tag in ['ForeName', 'MiddleName', 'LastName']:
-                    part = auth.findtext(tag)
-                    if part:
-                        name_parts.append(format_text(part))
-                if name_parts:
-                    authors.append(" ".join(name_parts))
-            
-            date = get_custom_publication_date(article)
-            if not date:
-                continue  # Skip if no valid date found
-            
-            version = article.findtext('.//PMID[@Version]')
-            type_ = format_text(article.findtext('.//PublicationType'))
-            journal = article.findtext('.//Journal/Title')
-            
-            # Combine all AbstractText elements.
-            abstract_parts = []
-            for a in article.findall('.//Abstract/AbstractText'):
-                txt = a.text
-                if txt:
-                    txt = txt.strip()
-                    label = a.attrib.get('Label', '').strip()
-                    if label:
-                        abstract_parts.append(f"{label}: {txt}")
-                    else:
-                        abstract_parts.append(txt)
-            abstract = "\n".join(abstract_parts).strip()
-            
-            articles_data.append({
-                'doi': doi,
-                'title': title,
-                'authors': '; '.join(authors),
-                'date': date,
-                'version': version,
-                'type': type_,
-                'journal': journal,
-                'abstract': abstract
-            })
-        articles_df = pd.DataFrame(articles_data)
-        articles_df.drop_duplicates(['doi', 'title', 'abstract'], inplace=True)
-        return articles_df
-    except ET.ParseError:
-        print(f"Error parsing file: {filename}")
-        return pd.DataFrame()
+def efficient_process_xml_file(filename):  
+    """  
+    Memory-efficient processing of PubMed XML file that uses a fixed schema  
+    and processes the file in streaming fashion to minimize memory usage.  
+    Never skips articles due to missing dates.  
+    """  
+    STANDARD_COLUMNS = [  
+        'doi', 'title', 'authors', 'date', 'version', 'type', 'journal', 'abstract',  
+        'pmid', 'mesh_terms', 'keywords', 'chemicals'  
+    ]  
 
-def process_and_save(file, processed_directory):
-    """
-    Process a single XML file and save the resulting DataFrame as a Parquet file.
-    Skips processing if the Parquet file already exists.
-    """
-    file_stem = robust_basename(file)
-    parquet_file = os.path.join(processed_directory, file_stem + ".parquet")
-    if os.path.exists(parquet_file):
-        return
-    print(f"Processing {file}...")
-    df = process_xml_file(file)
-    if df is not None and not df.empty:
-        df.to_parquet(parquet_file, index=False)
-        print(f"Saved in {parquet_file}")
-    else:
+    articles_data = []  
+    context = ET.iterparse(filename, events=('end',))  
+
+    for event, elem in context:  
+        if elem.tag.endswith('PubmedArticle'):  
+            try:  
+                article_data = {col: "" for col in STANDARD_COLUMNS}  
+
+                for article_id in elem.findall('.//ArticleId'):  
+                    if article_id.get('IdType') == 'doi' and article_id.text:  
+                        article_data['doi'] = format_text(article_id.text)  
+                        break  
+
+                pmid_elem = elem.find('.//PMID')  
+                if pmid_elem is not None and pmid_elem.text:  
+                    article_data['pmid'] = pmid_elem.text.strip()  
+                    if 'Version' in pmid_elem.attrib:  
+                        article_data['version'] = pmid_elem.attrib['Version']  
+
+                title_elem = elem.find('.//ArticleTitle')  
+                if title_elem is not None:  
+                    title_parts = []  
+                    for text in title_elem.itertext():  
+                        if text and text.strip():  
+                            title_parts.append(text.strip())  
+                    article_data['title'] = format_text(' '.join(title_parts))  
+
+                date = get_custom_publication_date(elem)  
+                article_data['date'] = date if date else ""  
+
+                pub_type_elem = elem.find('.//PublicationType')  
+                if pub_type_elem is not None and pub_type_elem.text:  
+                    article_data['type'] = format_text(pub_type_elem.text)  
+
+                journal_elem = elem.find('.//Journal/Title')  
+                if journal_elem is not None and journal_elem.text:  
+                    article_data['journal'] = format_text(journal_elem.text)  
+                else:  
+                    journal_elem = elem.find('.//MedlineTA')  
+                    if journal_elem is not None and journal_elem.text:  
+                        article_data['journal'] = format_text(journal_elem.text)  
+
+                authors = []  
+                for auth in elem.findall('.//AuthorList/Author'):  
+                    name_parts = []  
+                    for tag in ['ForeName', 'MiddleName', 'LastName']:  
+                        part_elem = auth.find(tag)  
+                        if part_elem is not None and part_elem.text:  
+                            name_parts.append(format_text(part_elem.text))  
+                    if name_parts:  
+                        authors.append(" ".join(name_parts))  
+                article_data['authors'] = '; '.join(authors)  
+
+                abstract_parts = []  
+                for abstract_text in elem.findall('.//Abstract/AbstractText'):  
+                    txt = abstract_text.text  
+                    if txt:  
+                        txt = txt.strip()  
+                        for child_text in abstract_text.itertext():  
+                            if child_text != txt:  
+                                txt += ' ' + child_text.strip()  
+                        label = abstract_text.get('Label', '').strip()  
+                        if label:  
+                            abstract_parts.append(f"{label}: {txt}")  
+                        else:  
+                            abstract_parts.append(txt)  
+                article_data['abstract'] = "\n".join(abstract_parts).strip()  
+
+                mesh_terms = []  
+                for mesh in elem.findall('.//MeshHeading'):  
+                    descriptor = mesh.find('DescriptorName')  
+                    if descriptor is not None and descriptor.text:  
+                        term = descriptor.text.strip()  
+                        qualifiers = []  
+                        for qualifier in mesh.findall('QualifierName'):  
+                            if qualifier.text:  
+                                qualifiers.append(qualifier.text.strip())  
+                        if qualifiers:  
+                            term += " [" + ", ".join(qualifiers) + "]"  
+                        mesh_terms.append(term)  
+                article_data['mesh_terms'] = '; '.join(mesh_terms)  
+
+                keywords = []  
+                for keyword in elem.findall('.//Keyword'):  
+                    if keyword.text:  
+                        keywords.append(keyword.text.strip())  
+                article_data['keywords'] = '; '.join(keywords)  
+
+                chemicals = []  
+                for chemical in elem.findall('.//Chemical/NameOfSubstance'):  
+                    if chemical.text:  
+                        chemicals.append(chemical.text.strip())  
+                article_data['chemicals'] = '; '.join(chemicals)  
+
+                articles_data.append(article_data)  
+
+            except Exception as e:  
+                print(f"Error processing article: {e}")  
+
+            elem.clear()  
+
+    articles_df = pd.DataFrame(articles_data)  
+    if not articles_df.empty:  
+        articles_df.drop_duplicates(['doi', 'title', 'abstract'], inplace=True)  
+
+    return articles_df
+
+def save_optimized_parquet(df, parquet_file, row_group_size=10000):  
+    """  
+    Save DataFrame to an optimized Parquet file for both storage efficiency and fast random access.  
+    """  
+    os.makedirs(os.path.dirname(parquet_file), exist_ok=True)  
+    compression_dict = {  
+        'abstract': 'ZSTD',  
+        'title': 'ZSTD',  
+        'authors': 'ZSTD',  
+        'mesh_terms': 'ZSTD',  
+        'keywords': 'ZSTD',  
+        'chemicals': 'ZSTD',  
+        'journal': 'SNAPPY',  
+        'type': 'SNAPPY',  
+        'date': 'SNAPPY',  
+        'version': 'SNAPPY',  
+        'doi': 'NONE',  
+        'pmid': 'NONE'  
+    }  
+    if 'date' in df.columns and not df.empty:  
+        df = df.sort_values('date')  
+    df.to_parquet(  
+        parquet_file,  
+        index=False,  
+        engine='pyarrow',  
+        compression=compression_dict,  
+        row_group_size=row_group_size,  
+        use_dictionary=True,            
+        data_page_size=8*1024*1024,     
+        write_statistics=True,          
+        version='2.6'                   
+    )  
+    print(f"Optimized parquet file saved at {parquet_file}")
+
+def process_and_save(file, processed_directory, row_group_size=10000):  
+    """  
+    Process a single XML file and save the resulting DataFrame as an optimized Parquet file.  
+    Skips processing if the Parquet file already exists.  
+    """  
+    file_stem = robust_basename(file)  
+    parquet_file = os.path.join(processed_directory, file_stem + ".parquet")  
+    if os.path.exists(parquet_file):  
+        return  
+    print(f"Processing {file}...")  
+    df = efficient_process_xml_file(file)  
+    if df is not None and not df.empty:  
+        save_optimized_parquet(df, parquet_file, row_group_size)  
+        print(f"Saved in {parquet_file}")  
+    else:  
         print(f"File {file} resulted in an empty DataFrame.")
 
 def parallel_process_xml_files(input_path, processed_directory, n_jobs=24):
@@ -385,18 +538,14 @@ def get_embedding(text, normalize=True, precision="ubinary"):
         "precision": precision
     }
     try:
-        # Adjust the URL if your server runs elsewhere.
         response = requests.post("http://localhost:8000/encode", json=payload)
         response.raise_for_status()
         data = response.json()
-        # Convert the returned list to a NumPy array with uint8 precision.
         embedding = np.array(data["embedding"], dtype=np.uint8)
-        # Remove any extra dimensions (if shape is (1, 128), squeeze it to (128,))
         embedding = np.squeeze(embedding)
         return embedding
     except Exception as e:
         print(f"Error obtaining embedding for text starting with '{text[:30]}': {e}")
-        # Return a zero vector of size 128 if there's an error (adjust if necessary)
         return np.zeros(128, dtype=np.uint8)
 
 def process_embeddings_api(file):
@@ -438,10 +587,7 @@ def main_api_embeddings(input_directory):
 # Main Entry Point
 ###############################
 def main():
-    
-    # Set the flag to indicate update is in progress.
-    update_in_progress = True
-    
+    global update_in_progress
     """
     Execute the complete pipeline:
       1. Download and extract XML files.
@@ -449,27 +595,17 @@ def main():
       3. Generate embeddings by sending requests to the embedding API.
     """
     ensure_directories()
-    
-    # Step 1: Download XML files if not already present.
     download_all_xmls()
-    
-    # Step 2: Process XML files into Parquet DataFrames.
     parallel_process_xml_files(DEST_XML_FOLDER, DEST_DF_FOLDER)
-    
-    # Step 3: Generate embeddings via the API.
     print("Starting API embeddings processing...")
     main_api_embeddings(DEST_DF_FOLDER)
+    update_in_progress = False
 
 if __name__ == "__main__":
-    # In this API version, we use sequential embedding processing.
     main()
     print("Pipeline completed successfully.")
-    
-    # Signal the server to shut down.
     if global_server is not None:
         print("Signaling FastAPI status server to shut down...")
         global_server.should_exit = True
-
-    # Wait for the server thread to finish.
     server_thread.join()
     print("Server has shut down.")
