@@ -75,7 +75,7 @@ def retry_on_exception(exception, retries=5, delay=2):
                     last_exception = e
                     print(f"Retrying due to: {str(e)}")
                     time.sleep(delay)
-            raise last_exception
+            raise last_exception  # type: ignore
         return wrapper
     return decorator
 
@@ -266,11 +266,11 @@ def upload_file(file_path, dropbox_file_path, dbx):
             if dropbox_mod_time >= local_mod_time:
                 print(f"Skipped {dropbox_file_path}, Dropbox version is up-to-date.")
                 return
-        except dropbox.exceptions.ApiError as e:
+        except dropbox.exceptions.ApiError as e: # type: ignore
             if not (hasattr(e, 'error') and e.error.is_path() and e.error.get_path().is_not_found()):
                 print(f"No existing file on Dropbox, proceeding with upload: {dropbox_file_path}")
         with file_path.open('rb') as f:
-            dbx.files_upload(f.read(), dropbox_file_path, mode=dropbox.files.WriteMode.overwrite)
+            dbx.files_upload(f.read(), dropbox_file_path, mode=dropbox.files.WriteMode.overwrite) # type: ignore
             print(f"Uploaded {dropbox_file_path}")
     except Exception as e:
         print(f"Failed to upload {dropbox_file_path}: {str(e)}")
