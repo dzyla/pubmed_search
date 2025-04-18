@@ -31,8 +31,8 @@ import signal
 ###############################
 # Global configuration and utility functions
 ###############################
-DEST_DF_FOLDER = '/mnt/q/test/pubmed_search/pubmed25_update_df/'
-DEST_EMBED_FOLDER = '/mnt/q/test/pubmed_search/pubmed25_update_embed/'
+DEST_DF_FOLDER = 'pubmed25_update_df/'
+DEST_EMBED_FOLDER = 'pubmed25_update_embed/'
 
 # New: Shared coordination directory
 COORDINATION_DIR = 'coordination/'

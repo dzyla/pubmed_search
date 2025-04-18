@@ -6,7 +6,6 @@ import yaml
 import requests
 import numpy as np
 import pandas as pd
-import torch
 import dropbox
 import streamlit as st
 from pathlib import Path
@@ -16,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI
 import uvicorn
 import threading
-import time
+import asyncio
 
 # Create FastAPI app.
 app = FastAPI()
@@ -34,7 +33,10 @@ def run_server():
     config = uvicorn.Config(app, host="0.0.0.0", port=8001, log_level="info")
     server = uvicorn.Server(config)
     global_server = server
-    server.run()
+    # Create a new event loop for this thread.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.serve())
     print("FastAPI status server has stopped.")
 
 # Start the server in a separate thread.
@@ -43,7 +45,7 @@ server_thread.start()
 
 # --------------------- Load YAML Configuration ---------------------
 print("Loading YAML configuration...")
-with open("config_mss.yaml", "r") as f:
+with open("/root/pubmed_search/config_mss.yaml", "r") as f:
     config = yaml.safe_load(f)
 print("YAML configuration loaded.")
 
@@ -75,7 +77,7 @@ def retry_on_exception(exception, retries=5, delay=2):
                     last_exception = e
                     print(f"Retrying due to: {str(e)}")
                     time.sleep(delay)
-            raise last_exception  # type: ignore
+            raise last_exception
         return wrapper
     return decorator
 
@@ -266,11 +268,11 @@ def upload_file(file_path, dropbox_file_path, dbx):
             if dropbox_mod_time >= local_mod_time:
                 print(f"Skipped {dropbox_file_path}, Dropbox version is up-to-date.")
                 return
-        except dropbox.exceptions.ApiError as e: # type: ignore
+        except dropbox.exceptions.ApiError as e:
             if not (hasattr(e, 'error') and e.error.is_path() and e.error.get_path().is_not_found()):
                 print(f"No existing file on Dropbox, proceeding with upload: {dropbox_file_path}")
         with file_path.open('rb') as f:
-            dbx.files_upload(f.read(), dropbox_file_path, mode=dropbox.files.WriteMode.overwrite) # type: ignore
+            dbx.files_upload(f.read(), dropbox_file_path, mode=dropbox.files.WriteMode.overwrite)
             print(f"Uploaded {dropbox_file_path}")
     except Exception as e:
         print(f"Failed to upload {dropbox_file_path}: {str(e)}")
@@ -424,3 +426,4 @@ if __name__ == "__main__":
     # Wait for the server thread to finish.
     server_thread.join()
     print("Server has shut down.")
+    quit()

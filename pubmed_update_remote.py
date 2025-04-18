@@ -571,7 +571,6 @@ def main_api_embeddings(input_directory):
     for file in tqdm(file_paths, desc="API embeddings processing"):
         process_embeddings_api(file)
 
-
 def update_files_txt(parquet_directory, file_list_path):
     """
     Scans the given parquet_directory for Parquet files and appends their
@@ -605,6 +604,47 @@ def update_files_txt(parquet_directory, file_list_path):
                 print(f"Added: {filepath}")
 
 
+def update_files_txt(parquet_directory, npy_directory, file_list_path):
+    """
+    Scans the given parquet_directory for Parquet files that do NOT have a corresponding
+    .npy file in npy_directory and appends their absolute paths to file_list_path.
+    Duplicate entries are avoided.
+    
+    Parameters:
+      parquet_directory (str): Directory where Parquet files are stored.
+      npy_directory (str): Directory where corresponding .npy files (embeddings) are expected.
+      file_list_path (str): Path to the file (e.g. 'files.txt') where paths should be appended.
+    """
+    import os
+
+    # Get full absolute paths of all Parquet files in the directory.
+    parquet_files = [
+        os.path.abspath(os.path.join(parquet_directory, f))
+        for f in os.listdir(parquet_directory)
+        if f.endswith('.parquet')
+    ]
+    
+    # Read existing file paths (if file exists) into a set.
+    existing_paths = set()
+    if os.path.exists(file_list_path):
+        with open(file_list_path, 'r') as infile:
+            for line in infile:
+                existing_paths.add(line.strip())
+    
+    # Append new Parquet file paths that do not have corresponding .npy files.
+    with open(file_list_path, 'a') as outfile:
+        for parquet_path in parquet_files:
+            # Get the file stem (without extension)
+            base_name = os.path.splitext(os.path.basename(parquet_path))[0]
+            # Build the expected .npy file path.
+            npy_path = os.path.abspath(os.path.join(npy_directory, base_name + ".npy"))
+            if not os.path.exists(npy_path):
+                print(f"Missing: {npy_path}")
+                if parquet_path not in existing_paths:
+                    outfile.write(parquet_path + "\n")
+                    print(f"Added: {parquet_path}")
+
+
 ###############################
 # Main Entry Point
 ###############################
@@ -620,8 +660,8 @@ def main():
     download_all_xmls()
     parallel_process_xml_files(DEST_XML_FOLDER, DEST_DF_FOLDER)
     print("Starting API embeddings processing...")
+    update_files_txt(DEST_DF_FOLDER, DEST_EMBED_FOLDER, '/root/pubmed_search/files.txt')
     #main_api_embeddings(DEST_DF_FOLDER)
-    update_files_txt(DEST_DF_FOLDER, '/root/pubmed_search/files.txt')
     update_in_progress = False
 
 if __name__ == "__main__":

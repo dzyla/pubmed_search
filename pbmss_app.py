@@ -1,4 +1,5 @@
 import os
+from pdb import pm
 import re
 import json
 import math
@@ -12,6 +13,8 @@ import concurrent.futures
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -78,10 +81,6 @@ def log_time(task_name: str):
 # =============================================================================
 
 def get_current_active_users(db_path: str = "sessions_history.db", timeout: int = 300) -> int:
-    """
-    Inserts a record of the current user's connection into a SQLite database.
-    Returns the number of active sessions.
-    """
     if 'session_id' not in st.session_state:
         st.session_state.session_id = str(uuid.uuid4())
     session_id = st.session_state.session_id
@@ -115,9 +114,6 @@ def get_current_active_users(db_path: str = "sessions_history.db", timeout: int 
     return active_count
 
 def get_donation_collected() -> int:
-    """
-    Load the donation value from the donation_data.json file.
-    """
     with open('donation_data.json', 'r') as file:
         data = json.load(file)
     donation_value = data.get("donation_collected", 0)
@@ -130,23 +126,23 @@ def get_donation_collected() -> int:
 MODEL_SERVER_URL = "http://localhost:8000/encode"
 
 def get_query_embedding(query, normalize=True, precision="ubinary"):
-    """
-    Get the query embedding from the REST API model server.
-    """
     payload = {"text": query, "normalize": normalize, "precision": precision}
-    response = requests.post(MODEL_SERVER_URL, json=payload)
-    if response.status_code == 200:
-        data = response.json()
-        return data["embedding"]
-    else:
-        raise Exception(
-            f"Failed to get query embedding from model server: {response.status_code} {response.text}"
-        )
+    try:
+        response = requests.post(MODEL_SERVER_URL, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            return data["embedding"]
+        else:
+            st.error(f"Model API returned error {response.status_code}: {response.text}")
+            return None
+    except requests.exceptions.ConnectionError:
+        st.error("Model API not available. Please ensure that the model server is running.")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred while obtaining the query embedding: {e}")
+        return None
 
 def check_update_status():
-    """
-    Check whether a database update is running by calling the local update status endpoint.
-    """
     try:
         response = requests.get("http://localhost:8001/status", timeout=1)
         if response.status_code == 200:
@@ -157,11 +153,7 @@ def check_update_status():
         return None
     return None
 
-# Crossref Helper Functions
 def get_citation_count(doi_str):
-    """
-    Retrieve the number of times a manuscript has been cited using its DOI.
-    """
     works = Works()
     try:
         paper_data = works.doi(doi_str)
@@ -171,9 +163,6 @@ def get_citation_count(doi_str):
         return 0
 
 def get_clean_doi(doi_str):
-    """
-    Clean up a DOI string to ensure it is in the correct format.
-    """
     if 'arxiv.org' in doi_str:
         return doi_str
     try:
@@ -183,11 +172,93 @@ def get_clean_doi(doi_str):
         LOGGER.error(f"Error cleaning DOI {doi_str}: {e}")
         return doi_str
 
+# Function to check if an article is available as a full document.
+def get_full_text_link(row):
+    """
+    Check if the article is available on PubMed Central as a full document.
+    Uses the PubMed Central API to convert PubMed ID to PubMed Central ID.
+    If available, returns the PubMed Central link; otherwise falls back to the DOI link.
+    """
+    source = row.get("source", "None").lower()
+    if source.lower() == "pubmed":
+        pmid = row.get("version")
+        doi = row.get("doi")
+        if pmid:
+            url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={pmid}&format=json"
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    records = data.get("records", [])
+                    if records:
+                        record = records[0]
+                        pmcid = record.get("pmcid")
+                        if pmcid:
+                            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/"
+            except Exception as e:
+                st.error(f"Error contacting PubMed Central API: {e}")
+        
+        return None
+    else:
+        doi = row.get("doi")
+        if doi:
+            if "arxiv.org" in doi:
+                return doi
+            else:
+                return f"https://doi.org/{doi}"
+        return None
+
+
+# Precalculate full text links in parallel using ThreadPoolExecutor.
+def precalculate_full_text_links_parallel(df):
+    """
+    Process each row of the DataFrame in parallel to calculate the full text link.
+    Stores the result in a new column 'full_text_link'.
+    """
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        results = list(executor.map(get_full_text_link, [row for _, row in df.iterrows()]))
+    df["full_text_link"] = results
+    return df
+
+def report_dates_from_metadata(metadata_file: str) -> dict:
+    """
+    Loads metadata and extracts two dates from the source_stem.
+    """
+    def extract_dates(source_stem: str) -> list:
+        return re.findall(r"(\d{6})", source_stem)
+    
+    def format_date(date_str: str) -> str:
+        if len(date_str) != 6:
+            return date_str
+        return f"20{date_str[:2]}-{date_str[2:4]}-{date_str[4:]}"
+    
+    with open(metadata_file, "r") as f:
+        metadata = json.load(f)
+    
+    result = {"second_date_from_second_part": None, "second_date_from_last_part": None}
+    
+    if not metadata.get("chunks"):
+        #LOGGER.info("No chunks found in metadata.")
+        return result
+    chunk = metadata["chunks"][0]
+    parts = chunk.get("parts", [])
+
+    parts = sorted(parts, key=lambda x: x.get("source_stem", ""))
+    
+    if parts and isinstance(parts[-1], dict):
+        source_stem_last = parts[-1].get("source_stem", "")
+        dates_last = extract_dates(source_stem_last)
+        if len(dates_last) >= 2:
+            result["second_date_from_last_part"] = format_date(dates_last[1])
+            #LOGGER.info(f"Second date found in last part's source_stem: {result['second_date_from_last_part']}")
+        else:
+            LOGGER.warning("Not enough date strings found in the last part's source_stem.")
+    else:
+        LOGGER.warning("The metadata does not contain a valid last part.")
+    return result
+
 @st.cache_data(show_spinner=False)
 def get_references(doi_str):
-    """
-    Retrieve and format the list of references cited by a manuscript.
-    """
     works = Works()
     try:
         paper_data = works.doi(doi_str)
@@ -207,13 +278,114 @@ def get_references(doi_str):
         return []
 
 # =============================================================================
-# SECTION 4: Chunked Embeddings and Semantic Search
+# SECTION 4: Chunked Embeddings, Semantic Search, and Date Filtering
 # =============================================================================
 
+def get_location_for_index(global_idx: int, metadata: dict) -> dict:
+    intervals = []
+    for chunk in metadata["chunks"]:
+        for part in chunk["parts"]:
+            part_global_start = chunk["global_start"] + part["chunk_local_start"]
+            part_global_end = chunk["global_start"] + part["chunk_local_end"] - 1
+            intervals.append({
+                "global_start": part_global_start,
+                "global_end": part_global_end,
+                "source_stem": part["source_stem"],
+                "local_start": part["source_local_start"],
+                "local_end": part["source_local_end"]
+            })
+    intervals.sort(key=lambda x: x["global_start"])
+    for interval in intervals:
+        if interval["global_start"] <= global_idx <= interval["global_end"]:
+            offset = global_idx - interval["global_start"]
+            local_idx = interval["local_start"] + offset
+            return {"source_stem": interval["source_stem"], "local_idx": local_idx}
+    return None
+
+def check_date_on_the_fly_grouped(global_indices, metadata, data_folder, start_date, end_date):
+    """
+    Filters candidate global indices by reading only the date column from each corresponding
+    parquet file and checking if the candidate's date falls between start_date and end_date.
+    
+    This function groups candidates by file and processes each file in parallel (using 4 workers).
+    For arXiv files (detected by matching "arxiv_deduped" in the file stem), the column "update_date" is used;
+    for others, the "date" column is used.
+    
+    Returns a list of candidate global indices that pass the time filter.
+    """
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except Exception as e:
+        raise ValueError(f"Error parsing dates: {e}")
+    
+    # Group candidates by file_stem
+    file_to_candidates = {}
+    for idx in global_indices:
+        location = get_location_for_index(idx, metadata)
+        if location is None:
+            continue
+        file_stem = location["source_stem"]
+        local_idx = location["local_idx"]
+        file_to_candidates.setdefault(file_stem, []).append((idx, local_idx))
+    
+    def process_file(file_stem, candidates):
+        filtered = []
+        parquet_path = os.path.join(data_folder, f"{file_stem}.parquet")
+        if not os.path.exists(parquet_path):
+            LOGGER.info(f"File not found: {parquet_path}")
+            return filtered
+        
+        # Determine the date column by checking the parquet schema.
+        try:
+            parquet_file = pq.ParquetFile(parquet_path)
+            schema = parquet_file.schema_arrow
+            if "update_date" in schema.names:
+                date_col = "update_date"
+                LOGGER.info(f"Using 'update_date' column for file {file_stem}")
+            elif "date" in schema.names:
+                date_col = "date"
+            else:
+                LOGGER.error(f"Neither 'update_date' nor 'date' found in {parquet_path}")
+                return filtered
+        except Exception as e:
+            LOGGER.error(f"Error reading schema from {parquet_path}: {e}")
+            return filtered
+        
+        LOGGER.info(f"Reading Parquet file {parquet_path} for date filtering using column: {date_col}")
+        try:
+            table = pq.read_table(parquet_path, columns=[date_col])
+            # Reset index to ensure we can use iloc.
+            df = table.to_pandas().reset_index(drop=True)
+            df["date_converted"] = pd.to_datetime(df[date_col], errors="coerce")
+        except Exception as e:
+            LOGGER.error(f"Error reading {parquet_path}: {e}")
+            return filtered
+        
+        for global_idx, local_idx in candidates:
+            if local_idx < 0 or local_idx >= len(df):
+                continue
+            try:
+                row_date = df.iloc[local_idx]["date_converted"]
+            except Exception as e:
+                LOGGER.error(f"Error accessing row {local_idx} in {parquet_path}: {e}")
+                continue
+            if pd.isna(row_date):
+                continue
+            if start_dt <= row_date.to_pydatetime() <= end_dt:
+                filtered.append(global_idx)
+        return filtered
+
+    filtered_indices = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(process_file, file_stem, candidates)
+                   for file_stem, candidates in file_to_candidates.items()]
+        for future in concurrent.futures.as_completed(futures):
+            filtered_indices.extend(future.result())
+    return filtered_indices
+
 def build_sorted_intervals_from_metadata(metadata: dict) -> list:
-    """
-    Build a sorted list of global intervals for binary search.
-    """
     LOGGER.info("Building sorted intervals from metadata...")
     intervals = []
     for chunk in metadata["chunks"]:
@@ -230,10 +402,7 @@ def build_sorted_intervals_from_metadata(metadata: dict) -> list:
     LOGGER.info("Completed building and sorting intervals.")
     return intervals
 
-def find_file_for_index_in_metadata(global_idx: int, intervals: list) -> dict:
-    """
-    Perform binary search over cached intervals to find the file and its local index.
-    """
+def find_file_for_index_in_metadata_interval(global_idx: int, intervals: list) -> dict:
     lo = 0
     hi = len(intervals) - 1
     while lo <= hi:
@@ -249,40 +418,136 @@ def find_file_for_index_in_metadata(global_idx: int, intervals: list) -> dict:
             lo = mid + 1
     return None
 
+def perform_semantic_search_chunks(query_embedding: str,
+                                   metadata: dict,
+                                   chunk_dir: str,
+                                   folder: str,
+                                   precision: str = "ubinary",
+                                   top_k: int = 50,
+                                   corpus_index=None,
+                                   use_high_quality: bool = False,
+                                   start_date: str = None,
+                                   end_date: str = None):
+    all_hits = []
+    with log_time("Loading chunked embeddings for search"):
+        for chunk_info in metadata["chunks"]:
+            chunk_file = chunk_info["chunk_file"]
+            actual_rows = chunk_info["actual_rows"]
+            global_start = chunk_info["global_start"]
+            chunk_path = os.path.join(chunk_dir, chunk_file)
+            LOGGER.info(f"Processing chunk {chunk_file}: global indices {global_start} to {chunk_info['global_end']}, rows={actual_rows}")
+            try:
+                chunk_data = np.memmap(chunk_path,
+                                        dtype=np.uint8,
+                                        mode="r",
+                                        shape=(actual_rows, metadata["embedding_dim"]))
+            except Exception as e:
+                LOGGER.error(f"Failed to load chunk {chunk_file}: {e}")
+                continue
+            chunk_results, _, _ = semantic_search_faiss(
+                query_embedding,
+                corpus_index=corpus_index,
+                corpus_embeddings=chunk_data if corpus_index is None else None,
+                corpus_precision=precision,
+                top_k=top_k * 20,
+                calibration_embeddings=None,
+                rescore=False,
+                rescore_multiplier=4,
+                exact=True,
+                output_index=True,
+            )
+            if len(chunk_results) > 0:
+                hits = chunk_results[0]
+                for hit in hits:
+                    global_idx = global_start + hit["corpus_id"]
+                    embedding_vec = np.array(chunk_data[hit["corpus_id"]])
+                    all_hits.append({
+                        "corpus_id": global_idx,
+                        "score": hit["score"],
+                        "embedding": embedding_vec,
+                    })
+            del chunk_data
+
+    if start_date and end_date:
+        candidate_indices = [hit["corpus_id"] for hit in all_hits]
+        filtered_candidate_indices = check_date_on_the_fly_grouped(candidate_indices, metadata, folder, start_date, end_date)
+        LOGGER.info(f"Time filter applied: {len(filtered_candidate_indices)} out of {len(candidate_indices)} hits remain.")
+        all_hits = [hit for hit in all_hits if hit["corpus_id"] in filtered_candidate_indices]
+
+    if not all_hits:
+        LOGGER.info("Warning: No search results found across all chunks after time filtering.")
+        return [], pd.DataFrame()
+
+    all_hits.sort(key=lambda x: x["score"])
+    initial_hits = len(all_hits)
+
+    if "chunked_arxiv_embeddings" in chunk_dir:
+        seen_embeddings = set()
+        unique_hits = []
+        for hit in all_hits:
+            embedding_bytes = hit["embedding"].tobytes()
+            if embedding_bytes not in seen_embeddings:
+                seen_embeddings.add(embedding_bytes)
+                unique_hits.append(hit)
+        removed = initial_hits - len(unique_hits)
+        LOGGER.info(f"Removed {removed}/{initial_hits} duplicate embeddings from arXiv results.")
+        all_hits = unique_hits
+
+    if use_high_quality:
+        LOGGER.info(f"Using high quality mode with {len(all_hits)} candidates to find top {top_k} quality results.")
+        with log_time("Loading and filtering high-quality data"):
+            top_hits, data = load_data_for_indices(
+                all_hits,
+                metadata,
+                folder=folder,
+                use_high_quality=True,
+                top_k=top_k
+            )
+    else:
+        top_hits = all_hits[:top_k]
+        global_indices = [hit["corpus_id"] for hit in top_hits]
+        with log_time("Loading data for selected global indices"):
+            data = load_data_for_indices(global_indices, metadata, folder=folder, use_high_quality=False, top_k=top_k)
+
+    if not data.empty:
+        top_hits_df = pd.DataFrame(top_hits)
+        score_series = pd.Series(top_hits_df["score"].values, index=top_hits_df.index)
+        embedding_series = pd.Series(top_hits_df["embedding"].values, index=top_hits_df.index)
+        if len(data) != len(top_hits_df):
+            LOGGER.warning(f"Mismatch in lengths: data has {len(data)} rows; top_hits_df has {len(top_hits_df)} rows. Using the intersection of indices.")
+            min_len = min(len(data), len(top_hits_df))
+            data = data.iloc[:min_len].copy()
+            score_series = score_series.iloc[:min_len]
+            embedding_series = embedding_series.iloc[:min_len]
+        data["score"] = score_series.values
+        data["embedding"] = embedding_series.values
+    LOGGER.info(f"Final search results prepared: {len(top_hits)} hits, {len(data)} data rows.")
+    return top_hits, data
 
 def load_data_for_indices(indices_or_hits: list, metadata: dict, folder: str, use_high_quality: bool = False, top_k: int = 50):
-    """
-    Load data rows corresponding to global indices from Parquet files.
-    
-    In normal mode, the function groups indices by file and loads batches of rows.
-    
-    In high-quality mode, the function iterates over candidate hits (which include
-    score and embedding information) in order. For each candidate, it loads only the
-    corresponding row and checks that the row has a non-empty 'title' and an 'abstract'
-    with length greater than a set threshold (here, 50 characters). Only accepted rows
-    are added until top_k accepted entries are found.
-    """
     if not use_high_quality:
-        # Normal mode: indices_or_hits is a list of global indices.
-        global_indices = indices_or_hits
-        LOGGER.info("Loading data for given global indices from Parquet files (optimized)...")
+        LOGGER.info("Loading data for given global indices from Parquet files (parallel optimized)...")
         intervals = build_sorted_intervals_from_metadata(metadata)
         file_indices = {}
-        for idx in global_indices:
-            location = find_file_for_index_in_metadata(idx, intervals)
+        for idx in indices_or_hits:
+            location = find_file_for_index_in_metadata_interval(idx, intervals)
             if location is not None:
                 file_name = location["source_stem"]
                 file_indices.setdefault(file_name, []).append(location["local_idx"])
             else:
-                LOGGER.warning(f"Global index {idx} not found in metadata intervals.")
-        results = []
-        for file_name, local_indices in file_indices.items():
-            parquet_path = os.path.join(folder, f"{file_name}.parquet")
-            LOGGER.info(f"Processing file: {parquet_path} with indices: {local_indices}")
+                LOGGER.warning("Global index {} not found in metadata intervals.".format(idx))
+        
+        def process_file(file_name, local_indices):
+            parquet_path = os.path.join(folder, "{}.parquet".format(file_name))
+            LOGGER.info("Processing file: {} with indices: {}".format(parquet_path, local_indices))
             if not os.path.exists(parquet_path):
-                LOGGER.warning(f"Parquet file not found for source {file_name} at {parquet_path}")
-                continue
-            parquet_file = pq.ParquetFile(parquet_path)
+                LOGGER.warning("Parquet file not found for source {} at {}".format(file_name, parquet_path))
+                return None
+            try:
+                parquet_file = pq.ParquetFile(parquet_path)
+            except Exception as e:
+                LOGGER.error("Error opening Parquet file {}: {}".format(parquet_path, e))
+                return None
             num_row_groups = parquet_file.num_row_groups
             group_boundaries = []
             total_rows = 0
@@ -299,94 +564,145 @@ def load_data_for_indices(indices_or_hits: list, metadata: dict, folder: str, us
                     relative_idx = local_idx - starts[rg]
                     rg_to_indices.setdefault(rg, []).append(relative_idx)
                 else:
-                    LOGGER.warning(f"Local index {local_idx} not found in any row group.")
+                    LOGGER.warning("Local index {} not found in any row group.".format(local_idx))
+            results = []
             for rg, indices in rg_to_indices.items():
                 indices.sort()
-                table = parquet_file.read_row_group(rg)
+                try:
+                    table = parquet_file.read_row_group(rg)
+                except Exception as e:
+                    LOGGER.error("Error reading row group {} from {}: {}".format(rg, parquet_path, e))
+                    continue
                 pa_indices = pa.array(indices, type=pa.int64())
-                subset_table = table.take(pa_indices)
+                try:
+                    subset_table = table.take(pa_indices)
+                except Exception as e:
+                    LOGGER.error("Error taking indices {} from row group {}: {}".format(indices, rg, e))
+                    continue
                 df_subset = subset_table.to_pandas()
                 df_subset['source_file'] = os.path.basename(parquet_path)
                 results.append(df_subset)
+                del table, subset_table
+            del parquet_file
+            if results:
+                return pd.concat(results, ignore_index=True)
+            return None
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(process_file, file_name, local_indices)
+                       for file_name, local_indices in file_indices.items()]
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    results.append(result)
         if not results:
             LOGGER.info("No data loaded. Returning empty DataFrame.")
             return pd.DataFrame()
         df_combined = pd.concat(results, ignore_index=True)
-        LOGGER.info("Completed loading data for all global indices (optimized).")
+        LOGGER.info("Completed loading data for all global indices (parallel optimized).")
         return df_combined
+
     else:
-        # High-quality mode: indices_or_hits is a list of candidate hits.
+        LOGGER.info("Loading high-quality data for candidate global indices (parallel optimized)...")
         accepted_hits = []
         accepted_rows = []
         intervals = build_sorted_intervals_from_metadata(metadata)
-        parquet_cache = {}  # cache to avoid reopening files repeatedly
-        min_abstract_length = 75  # threshold for abstract length
-        
+        min_abstract_length = 75
+        file_hits = {}
         for hit in indices_or_hits:
             global_idx = hit["corpus_id"]
-            location = find_file_for_index_in_metadata(global_idx, intervals)
+            location = find_file_for_index_in_metadata_interval(global_idx, intervals)
             if location is None:
-                LOGGER.warning(f"Global index {global_idx} not found in metadata intervals.")
+                LOGGER.warning("Global index {} not found in metadata intervals.".format(global_idx))
                 continue
             file_name = location["source_stem"]
             local_idx = location["local_idx"]
-            parquet_path = os.path.join(folder, f"{file_name}.parquet")
+            file_hits.setdefault(file_name, []).append((hit, local_idx))
+        accepted_counter = [0]
+        counter_lock = threading.Lock()
+
+        def process_file_high_quality(file_name, hits_local, accepted_counter, counter_lock):
+            parquet_path = os.path.join(folder, "{}.parquet".format(file_name))
             if not os.path.exists(parquet_path):
-                LOGGER.warning(f"Parquet file not found for source {file_name} at {parquet_path}")
-                continue
-            if file_name in parquet_cache:
-                parquet_file, group_boundaries, starts, ends = parquet_cache[file_name]
-            else:
+                LOGGER.warning("Parquet file not found for source {} at {}".format(file_name, parquet_path))
+                return []
+            try:
                 parquet_file = pq.ParquetFile(parquet_path)
-                num_row_groups = parquet_file.num_row_groups
-                group_boundaries = []
-                total_rows = 0
-                for rg in range(num_row_groups):
-                    rg_num_rows = parquet_file.metadata.row_group(rg).num_rows
-                    group_boundaries.append((total_rows, total_rows + rg_num_rows - 1))
-                    total_rows += rg_num_rows
-                starts = np.array([start for start, end in group_boundaries])
-                ends = np.array([end for start, end in group_boundaries])
-                parquet_cache[file_name] = (parquet_file, group_boundaries, starts, ends)
-            rg = np.searchsorted(ends, local_idx, side='right')
-            if rg < len(group_boundaries) and local_idx >= starts[rg]:
-                relative_idx = local_idx - starts[rg]
-                table = parquet_file.read_row_group(rg)
-                pa_indices = pa.array([relative_idx], type=pa.int64())
-                subset_table = table.take(pa_indices)
-                df_subset = subset_table.to_pandas()
-                df_subset['source_file'] = os.path.basename(parquet_path)
-                
-                # Quality check: verify that 'title' exists and is non-empty and that
-                # 'abstract' exists and is longer than the minimum threshold.
-                title_valid = ('title' in df_subset.columns and 
-                               df_subset.at[0, 'title'] is not None and 
-                               str(df_subset.at[0, 'title']).strip() != "")
-                abstract_valid = ('abstract' in df_subset.columns and 
-                                  df_subset.at[0, 'abstract'] is not None and 
-                                  len(str(df_subset.at[0, 'abstract']).strip()) > min_abstract_length)
-                if title_valid and abstract_valid:
-                    accepted_hits.append(hit)
-                    accepted_rows.append(df_subset)
-                    LOGGER.info(f"Accepted global index {global_idx} from file {file_name}.")
+            except Exception as e:
+                LOGGER.error("Error opening Parquet file {}: {}".format(parquet_path, e))
+                return []
+            num_row_groups = parquet_file.num_row_groups
+            group_boundaries = []
+            total_rows = 0
+            for rg in range(num_row_groups):
+                rg_num_rows = parquet_file.metadata.row_group(rg).num_rows
+                group_boundaries.append((total_rows, total_rows + rg_num_rows - 1))
+                total_rows += rg_num_rows
+            starts = np.array([start for start, end in group_boundaries])
+            ends = np.array([end for start, end in group_boundaries])
+            accepted = []
+            for hit, local_idx in hits_local:
+                with counter_lock:
+                    if accepted_counter[0] >= top_k:
+                        break
+                rg = np.searchsorted(ends, local_idx, side='right')
+                if rg < len(group_boundaries) and local_idx >= starts[rg]:
+                    relative_idx = local_idx - starts[rg]
+                    try:
+                        table = parquet_file.read_row_group(rg)
+                    except Exception as e:
+                        LOGGER.error("Error reading row group {} from {}: {}".format(rg, parquet_path, e))
+                        continue
+                    pa_indices = pa.array([relative_idx], type=pa.int64())
+                    try:
+                        subset_table = table.take(pa_indices)
+                    except Exception as e:
+                        LOGGER.error("Error taking index {} from row group {}: {}".format(relative_idx, rg, e))
+                        continue
+                    df_subset = subset_table.to_pandas()
+                    df_subset['source_file'] = os.path.basename(parquet_path)
+                    title_valid = ('title' in df_subset.columns and
+                                   df_subset.at[0, 'title'] is not None and
+                                   str(df_subset.at[0, 'title']).strip() != "")
+                    abstract_valid = ('abstract' in df_subset.columns and
+                                      df_subset.at[0, 'abstract'] is not None and
+                                      len(str(df_subset.at[0, 'abstract']).strip()) > min_abstract_length)
+                    if title_valid and abstract_valid:
+                        accepted.append((hit, df_subset))
+                        with counter_lock:
+                            accepted_counter[0] += 1
+                            if accepted_counter[0] >= top_k:
+                                del table, subset_table
+                                break
+                    else:
+                        LOGGER.info("Rejected global index {} due to missing or insufficient title/abstract.".format(hit['corpus_id']))
+                    del table, subset_table
                 else:
-                    LOGGER.info(f"Rejected global index {global_idx} due to missing or insufficient title/abstract.")
-            else:
-                LOGGER.warning(f"Local index {local_idx} not found in any row group in file {file_name}.")
+                    LOGGER.warning("Local index {} not found in any row group in file {}.".format(local_idx, file_name))
+            del parquet_file
+            return accepted
+
+        accepted_results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(process_file_high_quality, file_name, hits_local, accepted_counter, counter_lock)
+                       for file_name, hits_local in file_hits.items()]
+            for future in concurrent.futures.as_completed(futures):
+                accepted_results.extend(future.result())
+        accepted_results.sort(key=lambda x: indices_or_hits.index(x[0]))
+        for hit, df_subset in accepted_results:
+            accepted_hits.append(hit)
+            accepted_rows.append(df_subset)
             if len(accepted_hits) >= top_k:
                 break
         if not accepted_hits:
             LOGGER.info("No high quality data found. Returning empty DataFrame.")
             return [], pd.DataFrame()
         df_combined = pd.concat(accepted_rows, ignore_index=True)
-        LOGGER.info("Completed loading high quality data for global indices.")
+        LOGGER.info("Completed loading high quality data for global indices (parallel optimized).")
         return accepted_hits, df_combined
 
-
 class ChunkedEmbeddings:
-    """
-    A wrapper for a list of memory-mapped embedding chunks.
-    """
     def __init__(self, chunks: list, chunk_boundaries: list, total_rows: int, embedding_dim: int):
         LOGGER.info("Initializing ChunkedEmbeddings object...")
         self.chunks = chunks
@@ -400,9 +716,6 @@ class ChunkedEmbeddings:
         return (self.total_rows, self.embedding_dim)
 
     def close(self):
-        """
-        Close the memory-mapped files to release RAM.
-        """
         for idx, chunk in enumerate(self.chunks):
             if hasattr(chunk, "_mmap"):
                 try:
@@ -478,6 +791,7 @@ def create_chunked_embeddings_memmap(embeddings_directory: str,
                 os.remove(file)
     else:
         LOGGER.info(f"No metadata file found at {metadata_path}. Will create new chunked embeddings.")
+    LOGGER.info(f"Creating chunked embeddings in {chunk_dir} with pattern {npy_files_pattern}...")
     os.makedirs(chunk_dir, exist_ok=True)
     LOGGER.info(f"Chunk directory ensured at {chunk_dir}.")
     npy_files = sorted(list(Path(embeddings_directory).glob(npy_files_pattern)))
@@ -554,13 +868,11 @@ def create_chunked_embeddings_memmap(embeddings_directory: str,
             chunk_global_end = global_index + group_total_rows
             chunk_boundaries.append((chunk_global_start, chunk_global_end))
             parts = []
-            # Precompute offsets for each file in this group sequentially.
             offsets = []
             current_offset = 0
             for file_info in group:
                 offsets.append(current_offset)
                 current_offset += file_info["rows"]
-            # Use ThreadPoolExecutor to parallelize file copying within this chunk.
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 futures = [
                     executor.submit(copy_file_into_chunk, file_info, memmap_array, off)
@@ -592,280 +904,24 @@ def create_chunked_embeddings_memmap(embeddings_directory: str,
     LOGGER.info("Metadata saved successfully and chunked embeddings creation completed.")
     return ChunkedEmbeddings(chunks, chunk_boundaries, total_rows, embedding_dim), metadata
 
-def perform_semantic_search_chunks(query_embedding: str,
-                                   model,  # model not used
-                                   metadata: dict,
-                                   chunk_dir: str,
-                                   folder: str,
-                                   precision: str = "ubinary",
-                                   top_k: int = 50,
-                                   corpus_index=None,
-                                   use_high_quality: bool = False):
-    """
-    Execute semantic search on chunked embeddings.
-    """
-    all_hits = []
-    with log_time("Loading chunked embeddings for search"):
-        for chunk_info in metadata["chunks"]:
-            chunk_file = chunk_info["chunk_file"]
-            actual_rows = chunk_info["actual_rows"]
-            global_start = chunk_info["global_start"]
-            chunk_path = os.path.join(chunk_dir, chunk_file)
-            LOGGER.info(f"Processing chunk {chunk_file}: global indices {global_start} to {chunk_info['global_end']}, rows={actual_rows}")
-            try:
-                chunk_data = np.memmap(chunk_path,
-                                        dtype=np.uint8,
-                                        mode="r",
-                                        shape=(actual_rows, metadata["embedding_dim"]))
-            except Exception as e:
-                LOGGER.error(f"Failed to load chunk {chunk_file}: {e}")
-                continue
-            chunk_results, _, _ = semantic_search_faiss(
-                query_embedding,
-                corpus_index=corpus_index,
-                corpus_embeddings=chunk_data if corpus_index is None else None,
-                corpus_precision=precision,
-                top_k=top_k * 20,
-                calibration_embeddings=None,
-                rescore=False,
-                rescore_multiplier=4,
-                exact=True,
-                output_index=True,
-            )
-            if len(chunk_results) > 0:
-                hits = chunk_results[0]
-                for hit in hits:
-                    global_idx = global_start + hit["corpus_id"]
-                    embedding_vec = np.array(chunk_data[hit["corpus_id"]])
-                    all_hits.append({
-                        "corpus_id": global_idx,
-                        "score": hit["score"],
-                        "embedding": embedding_vec,
-                    })
-            del chunk_data
-    if not all_hits:
-        LOGGER.info("Warning: No search results found across all chunks.")
-        return [], pd.DataFrame()
-    all_hits.sort(key=lambda x: x["score"])
-    initial_hits = len(all_hits)
-    if "chunked_arxiv_embeddings" in chunk_dir:
-        seen_embeddings = set()
-        unique_hits = []
-        for hit in all_hits:
-            embedding_bytes = hit["embedding"].tobytes()
-            if embedding_bytes not in seen_embeddings:
-                seen_embeddings.add(embedding_bytes)
-                unique_hits.append(hit)
-        removed = initial_hits - len(unique_hits)
-        LOGGER.info(f"Removed {removed}/{initial_hits} duplicate embeddings from arXiv results.")
-        all_hits = unique_hits
-
-    # Create a mapping from corpus_id to hit for easy lookup
-    hit_dict = {hit["corpus_id"]: hit for hit in all_hits}
-
-    # Handle high_quality mode differently
-    if use_high_quality:
-        LOGGER.info(f"Using high quality mode with {len(all_hits)} candidates to find top {top_k} quality results.")
-        # Send all hits to load_data_for_indices which will filter for quality
-        all_global_indices = [hit["corpus_id"] for hit in all_hits]
-        with log_time("Loading and filtering high-quality data"):
-            data = load_data_for_indices(
-                all_global_indices,
-                metadata,
-                folder=folder,
-                use_high_quality=True,
-                top_k=top_k
-            )
-
-            # Filter top_hits to only include the corpus_ids that were kept after quality filtering
-            if len(data) > 0 and 'corpus_id' in data.columns:
-                filtered_corpus_ids = set(data['corpus_id'])
-                top_hits = [hit for hit in all_hits if hit["corpus_id"] in filtered_corpus_ids]
-                # Limit to top_k if needed
-                top_hits = top_hits[:top_k]
-            else:
-                top_hits = []
-    else:
-        # Original behavior: just take top_k
-        top_hits = all_hits[:top_k]
-        LOGGER.info(f"Total merged results: {len(all_hits)}; Top {top_k} selected.")
-        global_indices = [hit["corpus_id"] for hit in top_hits]
-        with log_time("Loading data for selected global indices"):
-            data = load_data_for_indices(global_indices, metadata, folder=folder)
-
-    # If no results remain after filtering, return empty
-    if len(data) == 0:
-        LOGGER.info("No results remained after filtering/loading.")
-        return [], pd.DataFrame()
-
-    # Ensure top_hits and data are properly aligned by corpus_id
-    if 'corpus_id' in data.columns:
-        data_corpus_ids = set(data['corpus_id'])
-        top_hits = [hit for hit in top_hits if hit["corpus_id"] in data_corpus_ids]
-
-        # Re-sort the dataframe to match top_hits order
-        hit_order = {hit["corpus_id"]: i for i, hit in enumerate(top_hits)}
-        data['__sort_key'] = data['corpus_id'].map(hit_order)
-        data = data.sort_values('__sort_key').drop('__sort_key', axis=1)
-
-    # Add score and embedding to data
-    score_map = {hit["corpus_id"]: hit["score"] for hit in top_hits}
-    embedding_map = {hit["corpus_id"]: hit["embedding"] for hit in top_hits}
-
-    data["score"] = data["corpus_id"].map(score_map)
-    data["embedding"] = data["corpus_id"].map(embedding_map)
-
-    LOGGER.info(f"Final search results prepared: {len(top_hits)} hits, {len(data)} data rows.")
-    return top_hits, data
-
-def perform_semantic_search_chunks(query_embedding: str,
-                                   model,  # model not used
-                                   metadata: dict,
-                                   chunk_dir: str,
-                                   folder: str,
-                                   precision: str = "ubinary",
-                                   top_k: int = 50,
-                                   corpus_index=None,
-                                   use_high_quality: bool = False): 
-    """
-    Execute semantic search on chunked embeddings.
-    
-    In normal mode, the top_k hits are selected based on score.
-    In high-quality mode, the entire candidate list is passed to the data loader
-    which accepts only rows with a valid title and an abstract longer than a threshold.
-    """
-    all_hits = []
-    with log_time("Loading chunked embeddings for search"):
-        for chunk_info in metadata["chunks"]:
-            chunk_file = chunk_info["chunk_file"]
-            actual_rows = chunk_info["actual_rows"]
-            global_start = chunk_info["global_start"]
-            chunk_path = os.path.join(chunk_dir, chunk_file)
-            LOGGER.info(f"Processing chunk {chunk_file}: global indices {global_start} to {chunk_info['global_end']}, rows={actual_rows}")
-            try:
-                chunk_data = np.memmap(chunk_path,
-                                        dtype=np.uint8,
-                                        mode="r",
-                                        shape=(actual_rows, metadata["embedding_dim"]))
-            except Exception as e:
-                LOGGER.error(f"Failed to load chunk {chunk_file}: {e}")
-                continue
-            chunk_results, _, _ = semantic_search_faiss(
-                query_embedding,
-                corpus_index=corpus_index,
-                corpus_embeddings=chunk_data if corpus_index is None else None,
-                corpus_precision=precision,
-                top_k=top_k * 20,
-                calibration_embeddings=None,
-                rescore=False,
-                rescore_multiplier=4,
-                exact=True,
-                output_index=True,
-            )
-            if len(chunk_results) > 0:
-                hits = chunk_results[0]
-                for hit in hits:
-                    global_idx = global_start + hit["corpus_id"]
-                    embedding_vec = np.array(chunk_data[hit["corpus_id"]])
-                    all_hits.append({
-                        "corpus_id": global_idx,
-                        "score": hit["score"],
-                        "embedding": embedding_vec,
-                    })
-            del chunk_data
-
-    if not all_hits:
-        LOGGER.info("Warning: No search results found across all chunks.")
-        return [], pd.DataFrame()
-
-    all_hits.sort(key=lambda x: x["score"])
-    initial_hits = len(all_hits)
-
-    if "chunked_arxiv_embeddings" in chunk_dir:
-        seen_embeddings = set()
-        unique_hits = []
-        for hit in all_hits:
-            embedding_bytes = hit["embedding"].tobytes()
-            if embedding_bytes not in seen_embeddings:
-                seen_embeddings.add(embedding_bytes)
-                unique_hits.append(hit)
-        removed = initial_hits - len(unique_hits)
-        LOGGER.info(f"Removed {removed}/{initial_hits} duplicate embeddings from arXiv results.")
-        all_hits = unique_hits
-
-    if not use_high_quality:
-        # Normal mode: simply select the top_k hits.
-        top_hits = all_hits[:top_k]
-        global_indices = [hit["corpus_id"] for hit in top_hits]
-        with log_time("Loading data for selected global indices"):
-            data = load_data_for_indices(global_indices, metadata, folder=folder, use_high_quality=False, top_k=top_k)
-    else:
-        # High-quality mode: pass the full candidate list for iterative quality filtering.
-        with log_time("Loading high quality data for candidate global indices"):
-            top_hits, data = load_data_for_indices(all_hits, metadata, folder=folder, use_high_quality=True, top_k=top_k)
-
-    if not data.empty:
-        top_hits_df = pd.DataFrame(top_hits)
-        # Create Series for the new columns using the index from top_hits_df
-        score_series = pd.Series(top_hits_df["score"].values, index=top_hits_df.index)
-        embedding_series = pd.Series(top_hits_df["embedding"].values, index=top_hits_df.index)
-        if len(data) != len(top_hits_df):
-            LOGGER.warning(f"Mismatch in lengths: data has {len(data)} rows; top_hits_df has {len(top_hits_df)} rows. Using the intersection of indices.")
-            min_len = min(len(data), len(top_hits_df))
-            data = data.iloc[:min_len].copy()
-            score_series = score_series.iloc[:min_len]
-            embedding_series = embedding_series.iloc[:min_len]
-        data["score"] = score_series.values
-        data["embedding"] = embedding_series.values
-    LOGGER.info("Score and embedding columns added to data.")
-    LOGGER.info("Final search results prepared.")
-    return top_hits, data
-
-def report_dates_from_metadata(metadata_file: str) -> dict:
-    """
-    Loads metadata and extracts two dates from the source_stem.
-    """
-    def extract_dates(source_stem: str) -> list:
-        return re.findall(r"(\d{6})", source_stem)
-    
-    def format_date(date_str: str) -> str:
-        if len(date_str) != 6:
-            return date_str
-        return f"20{date_str[:2]}-{date_str[2:4]}-{date_str[4:]}"
-    
-    with open(metadata_file, "r") as f:
-        metadata = json.load(f)
-    
-    result = {"second_date_from_second_part": None, "second_date_from_last_part": None}
-    
-    if not metadata.get("chunks"):
-        LOGGER.info("No chunks found in metadata.")
-        return result
-    chunk = metadata["chunks"][0]
-    parts = chunk.get("parts", [])
-
-    parts = sorted(parts, key=lambda x: x.get("source_stem", ""))
-    
-    if parts and isinstance(parts[-1], dict):
-        source_stem_last = parts[-1].get("source_stem", "")
-        dates_last = extract_dates(source_stem_last)
-        if len(dates_last) >= 2:
-            result["second_date_from_last_part"] = format_date(dates_last[1])
-            LOGGER.info(f"Second date found in last part's source_stem: {result['second_date_from_last_part']}")
-        else:
-            LOGGER.warning("Not enough date strings found in the last part's source_stem.")
-    else:
-        LOGGER.warning("The metadata does not contain a valid last part.")
-    return result
+def perform_semantic_search_chunks_wrapper(query_embedding: str,
+                                           metadata: dict,
+                                           chunk_dir: str,
+                                           folder: str,
+                                           precision: str = "ubinary",
+                                           top_k: int = 50,
+                                           corpus_index=None,
+                                           use_high_quality: bool = False,
+                                           start_date: str = None,
+                                           end_date: str = None):
+    return perform_semantic_search_chunks(query_embedding, metadata, chunk_dir, folder,
+                                            precision, top_k, corpus_index, use_high_quality, start_date, end_date)
 
 # =============================================================================
 # SECTION 5: DataFrame Reformatting Functions
 # =============================================================================
 
 def reformat_biorxiv_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Reformat a BioRxiv DataFrame so its columns match the PubMed DataFrame.
-    """
     df = df.copy()
     if "server" in df.columns:
         df.rename(columns={"server": "journal"}, inplace=True)
@@ -877,14 +933,19 @@ def reformat_biorxiv_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def reformat_arxiv_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Reformat an arXiv DataFrame so its columns match the other datasets.
-    """
     df = df.copy()
-    df["doi"] = df["doi"].fillna("").astype(str).str.strip()
-    df.loc[df["doi"] == "", "doi"] = df["id"].apply(lambda x: f"https://arxiv.org/abs/{x}")
+    
+    # check if df is empty. If so, return the mock empty dataframe with proper columns
+    if df.empty:
+        return pd.DataFrame(columns=["doi", "title", "authors", "date", "version", "type", "journal", "abstract", "score", "embedding"])
+    
+    if "doi" not in df.columns and "id" in df.columns:
+        df["doi"] = df["id"].apply(lambda x: f"https://arxiv.org/abs/{x}")
+    else:
+        df["doi"] = df["doi"].fillna("").astype(str).str.strip()
+        df.loc[df["doi"] == "", "doi"] = df["id"].apply(lambda x: f"https://arxiv.org/abs/{x}")
     df["date"] = pd.to_datetime(df["update_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["journal"] = df["journal-ref"]
+    df["journal"] = df["journal-ref"] if "journal-ref" in df.columns else None
     def get_version_count(versions):
         try:
             if pd.isnull(versions):
@@ -895,7 +956,10 @@ def reformat_arxiv_df(df: pd.DataFrame) -> pd.DataFrame:
             return len(versions_list)
         except Exception:
             return None
-    df["version"] = df["versions"].apply(get_version_count)
+    if "versions" in df.columns:
+        df["version"] = df["versions"].apply(get_version_count)
+    else:
+        df["version"] = None
     df["type"] = "preprint"
     if "score" not in df.columns:
         df["score"] = None
@@ -913,9 +977,6 @@ def reformat_arxiv_df(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def load_model() -> SentenceTransformer:
-    """
-    Load the SentenceTransformer model and send it to the appropriate device.
-    """
     LOGGER.info("Loading SentenceTransformer model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     LOGGER.info(f"Using device: {device}")
@@ -926,9 +987,6 @@ def load_model() -> SentenceTransformer:
 
 @st.cache_resource
 def load_pumap_model_and_image(model_path: str, image_path: str) -> tuple:
-    """
-    Load the PuMAP model and its UMAP image.
-    """
     LOGGER.info("Loading PuMAP model and UMAP image...")
     model = load_pumap(model_path)
     image = np.load(image_path)
@@ -936,9 +994,6 @@ def load_pumap_model_and_image(model_path: str, image_path: str) -> tuple:
     return model, image
 
 def plot_embedding_network_advanced(query: str, query_embedding, final_results: pd.DataFrame, metric: str = "hamming") -> go.Figure:
-    """
-    Create a 2D plot where distances reflect pairwise similarities.
-    """
     if "embedding" not in final_results.columns:
         st.error("Embeddings not found in final results.")
         return go.Figure()
@@ -1002,19 +1057,18 @@ def plot_embedding_network_advanced(query: str, query_embedding, final_results: 
 # SECTION 7: Combined Search Function
 # =============================================================================
 
-def combined_search(query: str, configs: list, top_show: int = 10, precision: str = "ubinary", use_high_quality: bool = False) -> pd.DataFrame:
-    """
-    Execute a semantic search on multiple sources using the REST API.
-    """
+def combined_search(query: str, configs: list, top_show: int = 10, precision: str = "ubinary", use_high_quality: bool = False,
+                    start_date: str = None, end_date: str = None) -> pd.DataFrame:
     message_holder = STATUS
     message_holder.info("Encoding query via REST API...")
     query_embedding = get_query_embedding(query, normalize=True, precision=precision)
+    if query_embedding is None:
+        return pd.DataFrame()
     query_embedding = np.array(query_embedding, dtype=np.uint8)
     if query_embedding.ndim == 1:
         query_embedding = query_embedding[np.newaxis, :]
     st.session_state["query_embedding"] = query_embedding
 
-    # Load chunked embeddings for each database with time reporting.
     with log_time("Loading PubMed chunked embeddings"):
         pubmed_chunk_obj, pubmed_metadata = create_chunked_embeddings_memmap(
             embeddings_directory=pubmed_config["embeddings_directory"],
@@ -1050,43 +1104,48 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
 
     top_k = top_show
 
-    # Perform semantic searches with timing.
     with log_time("Performing PubMed semantic search"):
-        _, pubmed_df = perform_semantic_search_chunks(
-            query_embedding, None, pubmed_metadata,
+        _, pubmed_df = perform_semantic_search_chunks_wrapper(
+            query_embedding, pubmed_metadata,
             chunk_dir=pubmed_config["chunk_dir"],
             folder=pubmed_config["data_folder"],
             precision=precision, top_k=top_k,
             use_high_quality=use_high_quality,
+            start_date=start_date, end_date=end_date
         )
     pubmed_df["source"] = "PubMed"
 
     with log_time("Performing BioRxiv semantic search"):
-        _, biorxiv_df = perform_semantic_search_chunks(
-            query_embedding, None, biorxiv_metadata,
+        _, biorxiv_df = perform_semantic_search_chunks_wrapper(
+            query_embedding, biorxiv_metadata,
             chunk_dir=biorxiv_config["chunk_dir"],
             folder=biorxiv_config["data_folder"],
             precision=precision, top_k=top_k,
+            start_date=start_date, end_date=end_date
         )
     with log_time("Performing MedRxiv semantic search"):
-        _, medrxiv_df = perform_semantic_search_chunks(
-            query_embedding, None, medrxiv_metadata,
+        _, medrxiv_df = perform_semantic_search_chunks_wrapper(
+            query_embedding, medrxiv_metadata,
             chunk_dir=medrxiv_config["chunk_dir"],
             folder=medrxiv_config["data_folder"],
             precision=precision, top_k=top_k,
+            start_date=start_date, end_date=end_date
         )
     with log_time("Performing arXiv semantic search"):
-        _, arxiv_df = perform_semantic_search_chunks(
-            query_embedding, None, arxiv_metadata,
+        _, arxiv_df = perform_semantic_search_chunks_wrapper(
+            query_embedding, arxiv_metadata,
             chunk_dir=arxiv_config["chunk_dir"],
             folder=arxiv_config["data_folder"],
             precision=precision, top_k=top_k,
+            start_date=start_date, end_date=end_date
         )
 
     biorxiv_df = reformat_biorxiv_df(biorxiv_df)
     biorxiv_df["source"] = "BioRxiv"
+    
     medrxiv_df = reformat_biorxiv_df(medrxiv_df)
     medrxiv_df["source"] = "MedRxiv"
+
     arxiv_df = reformat_arxiv_df(arxiv_df)
     arxiv_df["source"] = "arXiv"
 
@@ -1094,12 +1153,15 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
     combined_df = pd.concat([pubmed_df, biorxiv_df, medrxiv_df, arxiv_df], ignore_index=True)
     raw_min = combined_df["score"].min()
     raw_max = combined_df["score"].max()
+    
     combined_df["quality"] = abs(combined_df["score"] - raw_max) + raw_min
     combined_df.sort_values(by="score", inplace=True)
+    
     if combined_df["doi"].notnull().all():
         combined_df = combined_df.drop_duplicates(subset=["doi"], keep="first")
     else:
         combined_df = combined_df.drop_duplicates(subset=["title"], keep="first")
+    
     final_results = combined_df.head(top_show).reset_index(drop=True)
     message_holder.empty()
     pubmed_chunk_obj.close()
@@ -1113,9 +1175,6 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
 # =============================================================================
 
 def define_style():
-    """
-    Define custom CSS styles for the Streamlit app.
-    """
     st.markdown(
         """
         <style>
@@ -1144,11 +1203,7 @@ def define_style():
     )
 
 def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med, db_size_arxiv):
-    """
-    Display the logos and database information with proper attribution and a liability disclaimer.
-    """
     active_users = get_current_active_users()
-    # Logo image URLs
     pubmed_logo = "https://upload.wikimedia.org/wikipedia/commons/thumb/f/fb/US-NLM-PubMed-Logo.svg/720px-US-NLM-PubMed-Logo.svg.png?20080121063734"
     biorxiv_logo = "https://www.biorxiv.org/sites/default/files/biorxiv_logo_homepage.png"
     medarxiv_logo = "https://www.medrxiv.org/sites/default/files/medRxiv_homepage_logo.png"
@@ -1157,7 +1212,6 @@ def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med, db_size_arxiv
     st.markdown(
         f"""
         <div style="display: flex; flex-direction: column; align-items: center; gap: 10px;">
-            <!-- Logos with clickable links and labels -->
             <div style="display: flex; justify-content: center; align-items: center; gap: 30px;">
                 <div style="text-align: center;">
                     <a href="https://pubmed.ncbi.nlm.nih.gov/" target="_blank">
@@ -1192,7 +1246,6 @@ def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med, db_size_arxiv
                     </div>
                 </div>
             </div>
-            <!-- Title, database info, and disclaimer -->
             <div style="text-align: center; margin-top: 10px;">
                 <h3 style="color: black; margin: 0; font-weight: 400;">Manuscript Semantic Search [MSS]</h3>
                 <p style="font-size: 16px; color: #555; margin: 5px 0 0 0;">
@@ -1207,9 +1260,6 @@ def logo(db_update_date, db_size_bio, db_size_pubmed, db_size_med, db_size_arxiv
         """,
         unsafe_allow_html=True,
     )
-
-
-
 
 LLM_prompt = """You are a research assistant tasked with summarizing a collection of abstracts extracted from a database of 39 million academic entries. Your goal is to synthesize a concise, clear, and insightful summary that captures the main themes, common findings, and noteworthy trends across the abstracts. 
 
@@ -1226,9 +1276,6 @@ Now, review the abstracts provided below and generate your summary.
 """
 
 def summarize_abstract(abstracts, instructions, api_key, model_name="gemini-2.0-flash-lite-preview-02-05"):
-    """
-    Summarizes the provided abstracts using Google's Gemini Flash model via the genai library.
-    """
     from google.genai import types
     if not api_key:
         return "API key not provided. Please obtain your own API key at https://aistudio.google.com/apikey"
@@ -1248,11 +1295,8 @@ def summarize_abstract(abstracts, instructions, api_key, model_name="gemini-2.0-
 # SECTION 9: Configurations and Database Size Loader
 # =============================================================================
 
-@st.cache_data
+#@st.cache_data
 def load_configs_and_db_sizes(config_yaml_path="config_mss.yaml"):
-    """
-    Load configurations from a YAML file and retrieve database sizes from JSON metadata files.
-    """
     with open(config_yaml_path, "r") as f:
         config_data = yaml.safe_load(f)
     pubmed_config = config_data.get("pubmed_config", {})
@@ -1290,6 +1334,7 @@ def load_configs_and_db_sizes(config_yaml_path="config_mss.yaml"):
 st.set_page_config(
     page_title="MSS",
     page_icon="📜",
+    
 )
 
 results = load_configs_and_db_sizes()
@@ -1316,83 +1361,116 @@ status = check_update_status()
 if status:
     st.info("Database update in progress. Search might be slow...")
 
-use_ai = False
-
+# --- Search Form ---
 with st.form("search_form"):
-    query = st.text_input("Enter your search query:", max_chars=8192)
+    query = st.text_area("Enter your search query:", max_chars=8192, height=68)
     col1, col2 = st.columns(2)
     with col1:
         num_to_show = st.number_input("Number of results to show:", min_value=1, max_value=50, value=10)
     with col2:
+        use_high_quality = st.toggle("Use high-quality search?", value=True,
+                                     help="Enable for more accurate results (only entries with full abstracts and titles). For all results, disable this option.")
+    # When date filtering is activated, include date inputs in the form.
+    if st.session_state.get("date_filter_toggle", False):
+        col_date1, col_date2 = st.columns(2)
+        with col_date1:
+            start_date_input = st.date_input("Start Date", value=datetime(2020, 1, 1))
+        with col_date2:
+            end_date_input = st.date_input("End Date", value=datetime.today())
+        start_date_str = start_date_input.strftime("%Y-%m-%d")
+        end_date_str = end_date_input.strftime("%Y-%m-%d")
+    else:
+        start_date_str = None
+        end_date_str = None
+    col3 = st.container()
+    with col3:
         if st.session_state.get("use_ai_checkbox"):
             ai_api_provided = st.text_input("Google AI API Key", value="", help="Obtain your own API key at https://aistudio.google.com/apikey", type="password")
         else:
             ai_api_provided = None
-        use_high_quality = st.checkbox("Use high-quality search?", value=False, 
-                                       help="Enable this option for more accurate results, only including entries with full abstracts and titles. This might not return all results.")
-    submitted = st.form_submit_button("Search 🔍")
+    submitted = st.form_submit_button("Search :material/search:", type="primary")
+
+# --- Outside the Form: Toggles for AI Summary and Date Filter ---
+col1, col2 = st.columns(2)
+use_ai = col1.toggle("Use AI generated summary?", key="use_ai_checkbox")
+activate_date_filter = col2.toggle("Use Date Filter", value=False, key="date_filter_toggle")
+STATUS = st.empty()
+
+st.markdown("---")
 
 col1, col2 = st.columns(2)
-ncol1, ncol2 = st.columns(2)
-use_ai = col1.checkbox("Use AI generated summary?", key="use_ai_checkbox")
-
-# Define a global STATUS element for user messages.
-STATUS = st.empty()
 
 if submitted and query:
     with st.spinner("Searching..."):
         search_start_time = datetime.now()
-        final_results = combined_search(query, configs, top_show=num_to_show, precision="ubinary", use_high_quality=use_high_quality)
+        final_results = combined_search(query, configs, top_show=num_to_show, precision="ubinary",
+                                        use_high_quality=use_high_quality,
+                                        start_date=start_date_str, end_date=end_date_str)
         total_time = datetime.now() - search_start_time
         st.markdown(f"<h6 style='text-align: center; color: #7882af;'>Search completed in {total_time.total_seconds():.2f} seconds</h6>", unsafe_allow_html=True)
         st.session_state["final_results"] = final_results
         st.session_state["search_query"] = query
         st.session_state["num_to_show"] = num_to_show
-        st.session_state["use_ai"] = st.session_state.get("use_ai_checkbox", False)
+        st.session_state["use_ai"] = use_ai
         st.session_state["ai_api_provided"] = ai_api_provided
         st.session_state["use_high_quality"] = use_high_quality
 else:
     final_results = st.session_state.get("final_results", pd.DataFrame())
 
 if not final_results.empty:
-    # Get sort option.
-    sort_option = col2.segmented_control("Sort results by:", options=["Relevance", "Publication Date", "Citations"], key="sort_option")
     
-    # Make a copy of the final results.
+    
+    sort_option = col2.segmented_control(
+        "Sort results by:", 
+        options=["Relevance", "Publication Date", "Citations"], 
+        key="sort_option"
+    )
     sorted_results = st.session_state["final_results"].copy()
-    
-    # Retrieve the DOI list from the DataFrame.
     all_doi = sorted_results["doi"].tolist()
-    
-    # Check if the DOI list in session state is different.
-    if st.session_state.get('doi_list') != all_doi:
-        st.session_state['doi_list'] = all_doi
-        st.session_state['citations'] = None
-        st.session_state['clean_doi'] = None
+    LOGGER.info(f"Found {all_doi} DOIs in the search results.")
 
-    # Compute citations if not cached.
-    if st.session_state.get('citations') is None:
+    # If the DOI list has changed, reset the cached values.
+    if st.session_state.get("doi_list") != all_doi:
+        st.session_state["doi_list"] = all_doi
+        st.session_state["citations"] = None
+        st.session_state["clean_doi"] = None
+        st.session_state["full_text_links"] = None
+
+    # Fetch citation counts only once.
+    if st.session_state.get("citations") is None:
         with st.spinner("Fetching citation counts..."):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 all_citations = list(executor.map(get_citation_count, all_doi))
-            st.session_state['citations'] = all_citations
+            st.session_state["citations"] = all_citations
     else:
-        all_citations = st.session_state.get('citations')
+        all_citations = st.session_state["citations"]
 
-    # Compute clean DOI if not cached.
-    if st.session_state.get('clean_doi') is None:
+    # Clean the DOI list only once.
+    if st.session_state.get("clean_doi") is None:
         with st.spinner("Cleaning DOI list..."):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 clean_doi_list = list(executor.map(get_clean_doi, all_doi))
-            st.session_state['clean_doi'] = clean_doi_list
+            st.session_state["clean_doi"] = clean_doi_list
     else:
-        clean_doi_list = st.session_state.get('clean_doi')
+        clean_doi_list = st.session_state["clean_doi"]
 
-    # Update the DataFrame with computed values.
     sorted_results["citations"] = all_citations
     sorted_results["doi"] = clean_doi_list
 
-    # Sort the DataFrame based on the selected option.
+    st.markdown("""  
+        <style>  
+        .paper-meta { color: #666; font-size: 0.9em; margin-top: 3px; }  
+        .full-text-badge {  
+            background-color: #e1f5fe;  
+            color: #0277bd;  
+            padding: 1px 5px;  
+            border-radius: 3px;  
+            font-size: 0.8em;  
+        }  
+        </style>  
+    """, unsafe_allow_html=True)
+
+    # Sort the results.
     if sort_option == "Publication Date":
         sorted_results["date_parsed"] = pd.to_datetime(sorted_results["date"], errors="coerce")
         sorted_results = sorted_results.sort_values(by="date_parsed", ascending=False).reset_index(drop=True)
@@ -1402,11 +1480,39 @@ if not final_results.empty:
     else:
         sorted_results = sorted_results.sort_values(by="score", ascending=True).reset_index(drop=True)
 
+    # Precalculate full text links only once.
+    if st.session_state.get("full_text_links") is None:
+        with log_time("Fetching full text links.."):
+            sorted_results = precalculate_full_text_links_parallel(sorted_results)
+            st.session_state["full_text_links"] = sorted_results["full_text_link"].tolist()
+    else:
+        sorted_results["full_text_link"] = st.session_state["full_text_links"]
+
+    full_text_link_n = sorted_results["full_text_link"].notnull().sum()
+    col1.markdown(f"#### Search results\n:material/import_contacts: {full_text_link_n} Full, free text available")
+    
+    
+    LOGGER.info(f"Showing {int(st.session_state.get('num_to_show', 10))} results.")
+    if sorted_results.shape[0] != int(st.session_state.get("num_to_show", 10)):
+        LOGGER.warning(f"Only {sorted_results.shape[0]} results found. Please refine your search query.")
+        st.warning(f"Only {sorted_results.shape[0]} results found. Please refine your search query.")
+    
     abstracts_for_summary = []
     for idx, row in sorted_results.iterrows():
         citations = row["citations"]
-        expander_title = f"{idx + 1}. {row['title']}\n\n _(Score: {row['quality']:.2f} | Date: {row['date']} | Citations: {citations})_"
-        doi_link = f"https://doi.org/{row['doi']}" if "arxiv.org" not in row['doi'] else row['doi']
+        doi_link = f"https://doi.org/{row['doi']}" if "arxiv.org" not in row["doi"] else row["doi"]
+        full_text_link = row.get("full_text_link")
+        final_link = full_text_link if full_text_link is not None else doi_link
+        full_text_notification = ":material/import_contacts:" if full_text_link is not None else ""
+        has_full_text = full_text_link is not None
+        
+        expander_title = (
+            f"{idx + 1}\. {row['title']}\n\n" # type: ignore
+            f"_(Score: {row['quality']:.2f} | Date: {row['date']} | Citations: {citations})_"
+        )
+        if full_text_notification:
+            expander_title += f" | {full_text_notification}"
+
         with st.expander(expander_title):
             col_a, col_b, col_c = st.columns(3)
             col_a.markdown(f"**Relative Score:** {row['quality']:.2f}")
@@ -1418,7 +1524,14 @@ if not final_results.empty:
             col_e.markdown(f"**Journal/Server:** {row.get('journal', 'N/A')}")
             abstracts_for_summary.append(row["abstract"])
             st.markdown(f"**Abstract:**\n{row['abstract']}")
-            st.markdown(f"**[Full Text Read]({doi_link})** 🔗")
+            # Show links  
+            link_cols = st.columns(3)  
+
+            if has_full_text:  
+                link_cols[0].markdown(f"**[:material/import_contacts: Read Full Text]({final_link})**")  
+            link_cols[1].markdown(f"**[:material/link: View on Publisher Website]({doi_link})**")
+        
+        
     try:
         sorted_results["Date"] = pd.to_datetime(sorted_results["date"])
         if "citations" not in sorted_results.columns:
@@ -1445,7 +1558,7 @@ if not final_results.empty:
         fig_scatter.update_layout(legend=dict(title="Source"))
     except Exception as e:
         st.error(f"Error in plotting Score vs Year: {str(e)}")
-    tabs = st.tabs(["Score vs Year", "Abstract Map"])
+    tabs = st.tabs(["Score vs Year", "Abstract Map", "References"])
     with tabs[0]:
         st.plotly_chart(fig_scatter, use_container_width=True)
     with tabs[1]:
@@ -1462,32 +1575,51 @@ if not final_results.empty:
             z=np.sqrt(hist.T),
             x=xedges,
             y=yedges,
-            colorscale="balance",
+            colorscale="dense",
             reversescale=False,
             showscale=False,
             opacity=1,
         )
         
-        
         if "embedding" in final_results.columns:
-            raw_embeddings = np.stack(final_results["embedding"].values)  # type: ignore
-            raw_embeddings_tensor = torch.from_numpy(raw_embeddings).float()
-            new_2d = pumap.transform(raw_embeddings_tensor)
+            # Create raw embeddings array from final_results
+            current_raw_embeddings = np.stack(final_results["embedding"].values)  # type: ignore
+            
+            # Check if we already have stored raw embeddings in session state
+            if "stored_raw_embeddings" in st.session_state:
+                # Compare stored embeddings with the current embeddings
+                if np.array_equal(st.session_state["stored_raw_embeddings"], current_raw_embeddings):
+                    # Use the stored UMAP result if the embeddings have not changed
+                    new_2d = st.session_state["stored_umap_result"]
+                else:
+                    # Convert the new raw embeddings to a tensor and recalculate UMAP
+                    current_tensor = torch.from_numpy(current_raw_embeddings).float()
+                    new_2d = pumap.transform(current_tensor)
+                    # Update session state with the new raw embeddings and UMAP result
+                    st.session_state["stored_raw_embeddings"] = current_raw_embeddings
+                    st.session_state["stored_umap_result"] = new_2d
+            else:
+                # First time calculation: convert to tensor and calculate UMAP
+                current_tensor = torch.from_numpy(current_raw_embeddings).float()
+                new_2d = pumap.transform(current_tensor)
+                # Store the raw embeddings and UMAP result in session state
+                st.session_state["stored_raw_embeddings"] = current_raw_embeddings
+                st.session_state["stored_umap_result"] = new_2d
+
+            # Extract UMAP dimensions for plotting
             scatter_x = new_2d[:, 0]
             scatter_y = new_2d[:, 1]
         else:
             st.error("final_results does not contain an 'embedding' column with high-dimensional embeddings.")
             scatter_x, scatter_y = [], []
         
-        # Define a custom color mapping for each source with blue/purple hues.
         source_color_map = {
-            "PubMed": "#4e79a7",    # Blue
-            "BioRxiv": "#ff6a6a",    # Purple
-            "MedRxiv": "#0f4d93",    # Light Blue
-            "arXiv": "#847c6f",      # Medium Purple
-            "Query": "#1e1e1e",      # Dark Blue
+            "PubMed": "#4e79a7",
+            "BioRxiv": "#ff6a6a",
+            "MedRxiv": "#0f4d93",
+            "arXiv": "#847c6f",
+            "Query": "#1e1e1e",
         }
-        # Create a list of colors for each point based on its 'source'
         marker_colors = [source_color_map.get(source, "#2a7aba") for source in final_results["source"]]
         
         scatter = go.Scatter(
@@ -1519,7 +1651,26 @@ if not final_results.empty:
             width=800,
         )
         st.plotly_chart(fig_abstract_map, use_container_width=True)
-    if st.session_state.get("use_ai") and abstracts_for_summary:
+    
+    with tabs[2]:
+        st.markdown("#### References")
+        # show authors, title, date, doi and link to the paper
+        LOGGER.info(f"Showing references... {sorted_results.columns}")
+        for idx, row in sorted_results.iterrows():
+            doi = row["doi"]
+            doi_link = f"https://doi.org/{doi}" if "arxiv.org" not in doi else doi
+            
+            authors = row["authors"] if row["authors"] else "Unknown"
+            title = row["title"] if row["title"] else "No title available"
+            date = row["date"] if row["date"] else "No date available"
+            journal = row["journal"] if row["journal"] else "No journal available"
+            if doi_link:
+                doi_link = f"[{doi_link}]({doi_link})"
+            else:
+                doi_link = "No DOI available"
+            st.markdown(f"**{idx + 1}\.** {authors}<br>{title} {date} {journal} <br> {doi_link}", unsafe_allow_html=True)
+            
+    if use_ai and abstracts_for_summary:
         with st.spinner("Generating AI summary..."):
             ai_gen_start = time.time()
             if st.session_state.get("ai_api_provided"):
@@ -1531,66 +1682,44 @@ if not final_results.empty:
             total_ai_time = time.time() - ai_gen_start
             st.markdown(f"**Time to generate summary:** {total_ai_time:.2f} seconds")
     STATUS.empty()
-    
-st.markdown(
+
+elif submitted and final_results.empty:
+    st.warning("#### No results found. Please try a different query.")
+
+st.markdown("---")
+c1, c2 = st.columns([2, 1])
+
+c1.markdown(
     """
     <div style='text-align: center;'>
         <b>[MSS] Developed by <a href="https://www.dzyla.com/" target="_blank">Dawid Zyla</a></b>
-        <br>
+        |
         <a href="https://github.com/dzyla/pubmed_search" target="_blank">Source code on GitHub</a>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.write("---")
-cost_monthly = 50
-c1, c2 = st.columns([2, 1])
-with c1:
-    st.markdown(
-        f"""
-        <div style="text-align: center; padding: 10px;">
-            <h3 style="margin-bottom: 5px; font-weight: normal;">Support MSS Server</h3>
-            <p style="font-size: 14px; color: #555;">
-                The monthly server cost is approximately ${cost_monthly}.
-                Any donation helps me keep the service running.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-with c2:
-    donation_collected = get_donation_collected()
-    target_amount = 50
-    progress_fraction = donation_collected / target_amount
-    st.progress(progress_fraction)
-    st.markdown(
-        f"""
-        <p style="text-align: center; font-size: 14px; color: #555; margin-bottom: 10px;">
-            ${donation_collected:.2f} raised of ${target_amount:.2f}
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div style="text-align: center; margin-top: 5px;">
-            <a href="https://www.buymeacoffee.com/dzyla" target="_blank" 
-               style="
-                    background-color: #3679ae;
-                    color: #ffffff;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    text-decoration: none;
-                    font-family: Lato, sans-serif;
-                    font-size: 16px;
-                    box-shadow: 0px 4px 6px rgba(0,0,0,0.1);
-                    transition: background-color 0.2s ease;
-               "
-               onMouseOver="this.style.backgroundColor='#26557b'"
-               onMouseOut="this.style.backgroundColor='#26557b'">
-                Buy me a coffee
-            </a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+c2.markdown(
+    """
+    <div style="text-align: center; margin-top: 5px;">
+        <a href="https://www.buymeacoffee.com/dzyla" target="_blank" 
+            style="
+                background-color: #3679ae;
+                color: #ffffff;
+                padding: 10px 20px;
+                border-radius: 5px;
+                text-decoration: none;
+                font-family: Lato, sans-serif;
+                font-size: 16px;
+                box-shadow: 0px 4px 6px rgba(0,0,0,0.1);
+                transition: background-color 0.2s ease;
+            "
+            onMouseOver="this.style.backgroundColor='#26557b'"
+            onMouseOut="this.style.backgroundColor='#26557b'">
+            Buy me a coffee
+        </a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

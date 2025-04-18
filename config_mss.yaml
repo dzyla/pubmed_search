@@ -1,26 +1,34 @@
 pubmed_config:
-  embeddings_directory: pubmed25_embed_update/"
-  xml_directory: pubmed25_update_xmls/"
+  embeddings_directory: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\test\\pubmed25_update_embed\\"
+  xml_directory: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\pubmed25_update_xmls\\"
   npy_files_pattern: "*.npy"
-  chunk_dir: chunked_pubmed_embeddings/"
-  metadata_path: pubmed_chunked_metadata.json"
-  data_folder: pubmed25_update_df/"
+  chunk_dir: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\chunked_pubmed_embeddings\\"
+  metadata_path: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\pubmed_chunked_metadata.json"
+  data_folder: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\test\\pubmed25_update_df\\"
   chunk_size_bytes: 1073741824  # 1GB in bytes
 
 biorxiv_config:
-  embeddings_directory: biorxiv_embed/"
+  embeddings_directory: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\biorxiv_embed\\"
   npy_files_pattern: "*.npy"
-  combined_data_file: biorxiv_df/combined_biorxiv_data.parquet"
-  chunk_dir: chunked_biorxiv_embeddings/"
-  metadata_path: biorxiv_chunked_memmap_metadata.json"
-  data_folder: biorxiv_df"
+  combined_data_file: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\biorxiv_df\\combined_biorxiv_data.parquet"
+  chunk_dir: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\chunked_biorxiv_embeddings\\"
+  metadata_path: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\biorxiv_chunked_memmap_metadata.json"
+  data_folder: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\biorxiv_df"
   chunk_size_bytes: 1073741824
 
 medrxiv_config:
-  embeddings_directory: medarxiv_embed/"
+  embeddings_directory: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\medarxiv_embed\\"
   npy_files_pattern: "*.npy"
-  combined_data_file: '/root/pubmed_semantic_search/medarxiv_df/database_2024-08-02.parquet'
-  chunk_dir: chunked_medarxiv_embeddings/"
-  metadata_path: medarxiv_chunked_memmap_metadata.json"
-  data_folder: medarxiv_df"
+  combined_data_file: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\medarxiv_df\\database_2024-08-02.parquet"
+  chunk_dir: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\chunked_medarxiv_embeddings\\"
+  metadata_path: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\medarxiv_chunked_memmap_metadata.json"
+  data_folder: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\medarxiv_df"
+  chunk_size_bytes: 1073741824
+
+arxiv_config:
+  embeddings_directory: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\arxiv_embed\\"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\chunked_arxiv_embeddings\\"
+  metadata_path: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\arxiv_chunked_memmap_metadata.json"
+  data_folder: "h:\\pubmed_semantic_search\\pubmed_semantic_search\\arxiv_df"
   chunk_size_bytes: 1073741824
