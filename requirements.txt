@@ -1,10 +1,8 @@
 beautifulsoup4
-concurrent.futures
-pandas<2.0
+pandas
 tqdm
 joblib
 lxml  # For better XML parsing performance (if not already installed with xml.etree)
-html
 unidecode
 streamlit
 plotly
@@ -18,5 +16,7 @@ crossref
 pyyaml
 requests
 google-generativeai
+pyyaml
 torch
 dropbox
+u

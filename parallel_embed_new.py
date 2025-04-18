@@ -31,8 +31,8 @@ import signal
 ###############################
 # Global configuration and utility functions
 ###############################
-DEST_DF_FOLDER = 'pubmed25_update_df/'
-DEST_EMBED_FOLDER = 'pubmed25_update_embed/'
+DEST_DF_FOLDER = '/mnt/q/test/pubmed_search/pubmed25_update_df/'
+DEST_EMBED_FOLDER = '/mnt/q/test/pubmed_search/pubmed25_update_embed/'
 
 # New: Shared coordination directory
 COORDINATION_DIR = 'coordination/'
@@ -454,10 +454,10 @@ def set_process_affinity(gpu_id):
         process = psutil.Process()
         num_cores = psutil.cpu_count(logical=False)
         num_gpus = AVAILABLE_GPUS
-        cores_per_gpu = max(1, num_cores // num_gpus) # type: ignore
+        cores_per_gpu = max(1, num_cores // num_gpus)
         start_core = gpu_id * cores_per_gpu
         end_core = start_core + cores_per_gpu
-        cpu_list = list(range(start_core, min(end_core, num_cores))) # type: ignore
+        cpu_list = list(range(start_core, min(end_core, num_cores)))
         if cpu_list:
             process.cpu_affinity(cpu_list)
             print(f"GPU {gpu_id} worker using CPU cores: {cpu_list}")
@@ -596,7 +596,7 @@ def process_embeddings_worker(gpu_id, batch_size=1):
         try:
             import psutil
             num_cores = psutil.cpu_count(logical=False)
-            cores_per_gpu = max(1, num_cores // AVAILABLE_GPUS) # type: ignore
+            cores_per_gpu = max(1, num_cores // AVAILABLE_GPUS)
             torch.set_num_threads(cores_per_gpu)
             print(f"[GPU {gpu_id}] Set torch thread count to {cores_per_gpu}")
         except:
