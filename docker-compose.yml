@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  model_api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.model
+    image: mss-model:latest
+    environment:
+      - MSS_AUTHOR_SALT=${MSS_AUTHOR_SALT}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount code read-only; in production you might bake code into the image
+      - ./:/app:ro
+      # Mount data directory; adjust to your host path or use a named volume
+      - ./data:/data
+    working_dir: /app
+    command: ["python", "model_api.py"]
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    image: mss-app:latest
+    depends_on:
+      - model_api
+    environment:
+      - MSS_AUTHOR_SALT=${MSS_AUTHOR_SALT}
+      # Point the app to the model API if needed (model_api binds 0.0.0.0:8000)
+      - MODEL_API_URL=http://model_api:8000
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app:ro
+      - ./data:/data
+    working_dir: /app
+    command: ["streamlit", "run", "pbmss_app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+
+volumes:
+  data:
+    driver: local

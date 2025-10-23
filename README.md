@@ -72,6 +72,50 @@ Then, you can update the database using the following scripts:
    ```
    This will open a web interface where you can enter your search query and explore the results.
 
+### Deployment and prewarming
+
+See the deployment guide in `DEPLOYMENT.md` for:
+
+* Prewarming chunked indices to avoid first-request latency
+* Single-VM and Docker Compose setups
+* Systemd service templates and reverse proxy tips
+
+Quick prewarm (recommended before first run):
+
+```zsh
+python scripts/prewarm_chunks.py --config config_mss.yaml
+```
+
+### Configuration: deterministic author ordering (server-side salt)
+
+We deterministically “randomize” author order using a server-side salt so the ordering is stable but not author-controlled.
+
+- Default (demo) salt in repo: `uberfordata`.
+- Production salt: set via environment variable or Streamlit secrets. Do NOT commit the real secret to git.
+
+Priority order for the salt at runtime:
+1. Streamlit secrets: `author_salt`
+2. Environment variable: `MSS_AUTHOR_SALT`
+3. Repo default: `uberfordata`
+
+Recommended deployment options:
+
+- Environment variable (systemd, Docker, or shell):
+   - macOS/Linux (zsh):
+      ```zsh
+      export MSS_AUTHOR_SALT="<YOUR_SECRET_SALT>"
+      streamlit run pbmss_app.py
+      ```
+
+- Streamlit secrets (server-side): add to `.streamlit/secrets.toml` (not tracked) or Streamlit Cloud secrets:
+   ```toml
+   author_salt = "<YOUR_SECRET_SALT>"
+   ```
+
+Notes:
+- The app constructs a deterministic seed per paper (e.g., using PMID+version, arXiv ID, or DOI) and sorts authors by an HMAC-SHA256 of `seed|author` with the configured salt. This ordering happens entirely server-side.
+- Keep your production salt out of version control and CI logs.
+
 ## Examples
 
 **Search Query:** `cryo-EM structure of measles virus fusion protein antibody complex` or 

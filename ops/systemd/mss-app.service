@@ -1,0 +1,15 @@
+[Unit]
+Description=MSS Streamlit App
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/mss
+Environment=MSS_AUTHOR_SALT=
+ExecStart=/usr/local/bin/streamlit run /opt/mss/pbmss_app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

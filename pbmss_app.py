@@ -1,4 +1,6 @@
 import os
+import hashlib
+import hmac
 from pdb import pm
 import re
 import json
@@ -45,6 +47,89 @@ from sentence_transformers.quantization import semantic_search_faiss
 from umap_pytorch import load_pumap
 
 import google.genai as genai
+
+# =============================================================================
+# Deterministic, salted author-order helpers (server-side only)
+# =============================================================================
+
+def _get_author_salt() -> str:
+    """
+    Retrieve the server-side salt used to deterministically order authors.
+    Priority:
+    1) Streamlit secrets (st.secrets["author_salt"])
+    2) Environment variable MSS_AUTHOR_SALT
+    3) Safe repo default "uberfordata" (DO NOT store real secrets in repo)
+    """
+    try:
+        # Streamlit secrets are server-side only; safe for production deployment.
+        if hasattr(st, "secrets") and isinstance(st.secrets, dict) and st.secrets.get("author_salt"):
+            return str(st.secrets.get("author_salt"))
+    except Exception:
+        pass
+    env_salt = os.getenv("MSS_AUTHOR_SALT")
+    if env_salt:
+        return env_salt
+    # Fallback demo value committed to the repo. Override in prod via secrets or env.
+    return "uberfordata"
+
+def _parse_authors(authors_str: str) -> list:
+    if not isinstance(authors_str, str) or not authors_str.strip():
+        return []
+    # Primary delimiter in our pipelines is semicolon. Fallback to comma if needed.
+    parts = [a.strip() for a in authors_str.split(";") if a.strip()]
+    if len(parts) <= 1:
+        parts = [a.strip() for a in authors_str.split(",") if a.strip()]
+    return parts
+
+def _format_authors(authors_list: list) -> str:
+    if not authors_list:
+        return ""
+    return "; ".join(authors_list)
+
+def _build_paper_seed(row: dict) -> str:
+    """
+    Build a per-paper deterministic seed from stable, non-author-controlled fields.
+    Preference order:
+      - PubMed: pmid + version
+      - arXiv: arXiv DOI/id
+      - Others: DOI
+      - Fallback: title|date
+    """
+    try:
+        source = str(row.get("source", "")).strip()
+        doi_val = row.get("doi")
+        pmid = row.get("pmid")
+        version = row.get("version")
+        title = row.get("title")
+        date = row.get("date")
+
+        if source == "PubMed" and pmid:
+            return f"pmid:{pmid}:{version if version is not None else ''}"
+        if source == "arXiv" or (isinstance(doi_val, str) and "arxiv.org" in doi_val):
+            return f"arxiv:{doi_val}"
+        if isinstance(doi_val, str) and doi_val:
+            return f"doi:{doi_val}"
+        return f"fallback:{title}|{date}"
+    except Exception:
+        return "fallback:unknown"
+
+def _author_sort_key(author: str, seed: str, salt: str) -> str:
+    """Return HMAC-SHA256(salt, f"{seed}|{author}") for deterministic per-paper ordering."""
+    msg = f"{seed}|{author}".encode("utf-8")
+    key = salt.encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+def reorder_authors_str(authors_str: str, row: dict, salt: str) -> str:
+    """
+    Deterministically reorder an authors string using a server-side salt.
+    """
+    authors = _parse_authors(authors_str)
+    if len(authors) <= 1:
+        return authors_str if isinstance(authors_str, str) else ""
+    # Include per-paper seed to avoid global bias, while remaining deterministic
+    seed = _build_paper_seed(row)
+    authors_sorted = sorted(authors, key=lambda a: (_author_sort_key(a, seed, salt), a.lower()))
+    return _format_authors(authors_sorted)
 
 # =============================================================================
 # SECTION 1: Logging and General Utilities
@@ -1168,6 +1253,16 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
     biorxiv_chunk_obj.close()
     medrxiv_chunk_obj.close()
     gc.collect()
+    # Apply deterministic, salted author ordering server-side before returning results
+    try:
+        author_salt = _get_author_salt()
+        if "authors" in final_results.columns:
+            # Apply row-wise to only the displayed results (fast)
+            final_results["authors"] = final_results.apply(
+                lambda r: reorder_authors_str(r.get("authors", ""), r.to_dict(), author_salt), axis=1
+            )
+    except Exception as e:
+        LOGGER.error(f"Author reordering failed: {e}")
     return final_results
 
 # =============================================================================
