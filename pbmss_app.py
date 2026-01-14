@@ -151,7 +151,7 @@ def get_citation_count_cached(doi_str):
 def get_link_info_cached(row_dict):
     # Wrapper to return a dictionary of link data we need
     # This prevents sending the whole dataframe row which breaks caching
-    source = row_dict.get("source", "").lower()
+    source = str(row_dict.get("source", "")).lower()
     pmid = row_dict.get("version") # Assuming version holds PMID for PubMed
     doi_val = row_dict.get("doi")
 
@@ -1147,8 +1147,8 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
             gc.collect()
 
             if not df.empty:
-                df["source"] = name
                 if reformat_func: df = reformat_func(df)
+                df["source"] = name
                 return df
         except Exception as e:
             LOGGER.error(f"Error in {name}: {e}")
