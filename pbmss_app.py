@@ -1157,7 +1157,7 @@ def combined_search(query: str, configs: list, top_show: int = 10, precision: st
     # Sequential execution to prevent RAM saturation
     STATUS.info("Searching PubMed...")
     all_dfs.append(process_source("PubMed", pubmed_config))
-    
+
     STATUS.info("Searching BioRxiv...")
     all_dfs.append(process_source("BioRxiv", biorxiv_config, reformat_biorxiv_df))
 
@@ -1401,9 +1401,16 @@ with st.form("search_form"):
     col3 = st.container()
     with col3:
         if st.session_state.get("use_ai_checkbox"):
-            ai_api_provided = st.text_input("Google AI API Key", value="", help="Obtain your own API key at https://aistudio.google.com/apikey", type="password")
+            ai_col1, ai_col2 = st.columns(2)
+            with ai_col1:
+                ai_api_provided = st.text_input("Google AI API Key", value="", help="Obtain your own API key at https://aistudio.google.com/apikey", type="password")
+            with ai_col2:
+                ai_model_name = st.selectbox("AI Model", options=["gemini-2.0-flash-lite-preview-02-05", "gemini-2.0-flash"], index=0)
+                ai_abstracts_count = st.number_input("Abstracts for Summary", min_value=1, max_value=20, value=9)
         else:
             ai_api_provided = None
+            ai_model_name = "gemini-2.0-flash-lite-preview-02-05"
+            ai_abstracts_count = 9
     submitted = st.form_submit_button("Search :material/search:", type="primary")
 
 # --- Outside the Form: Toggles for AI Summary and Date Filter ---
@@ -1475,87 +1482,79 @@ if not final_results.empty:
     else:
         # Default relevance (score)
         sorted_results = sorted_results.sort_values(by="score", ascending=True).reset_index(drop=True)
-    
+
     st.markdown(f"#### Found {len(sorted_results)} relevant abstracts")
 
-    # List to track what needs fetching
-    metadata_placeholders = []
+    # Precalculate full text links in parallel using ThreadPoolExecutor if not already there
+    # This addresses "restore search for full documents and return links" while trying to keep it fast
+    # We rely on cached helper functions.
+
+    # We fetch citations and links for the displayed results
+    # Ideally we should do this before rendering to "revert to the previous style"
+    # But to speed it up we use parallel execution.
+
+    displayed_rows = sorted_results.to_dict('records')
+
+    with st.spinner("Fetching metadata..."):
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            # Prepare tasks
+            future_to_idx = {}
+            for i, row in enumerate(displayed_rows):
+                # Submit citation fetch
+                future_cit = executor.submit(get_citation_count_cached, row['doi'])
+                # Submit link fetch
+                row_dict = {"source": row["source"], "version": row["version"], "doi": row["doi"]}
+                future_link = executor.submit(get_link_info_cached, row_dict)
+                future_to_idx[future_cit] = (i, 'citations')
+                future_to_idx[future_link] = (i, 'full_text_link')
+
+            # Wait for all
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx, kind = future_to_idx[future]
+                res = future.result()
+                displayed_rows[idx][kind] = res
+
+    # Convert back to DF if needed, or just iterate list
+    # Revert to original expander style
     abstracts_for_summary = []
 
-    # --- RENDER SKELETON (Instant) ---
-    for idx, row in sorted_results.iterrows():
-        # Clean basic data
-        title = row['title']
-        abstract = row['abstract']
-        abstracts_for_summary.append(abstract)
-        date = row['date']
-        source = row['source']
-        score = row['quality']
+    for idx, row in enumerate(displayed_rows):
+        citations = row.get("citations", 0)
+        # Handle cases where citations is None
+        if citations is None: citations = 0
 
-        # Expander Title (Basic info only initially)
-        expander_title = f"{idx + 1}. {title} | {date}"
-        
+        doi_val = row["doi"]
+        doi_link = f"https://doi.org/{doi_val}" if "arxiv.org" not in doi_val else doi_val
+        full_text_link = row.get("full_text_link")
+
+        final_link = full_text_link if full_text_link is not None else doi_link
+        full_text_notification = ":material/import_contacts:" if full_text_link is not None else ""
+        has_full_text = full_text_link is not None
+
+        expander_title = (
+            f"{idx + 1}\. {row['title']}\n\n"
+            f"_(Score: {row['quality']:.2f} | Date: {row['date']} | Citations: {citations})_"
+        )
+        if full_text_notification:
+            expander_title += f" | {full_text_notification}"
+
         with st.expander(expander_title):
-            # Layout columns
-            m_col1, m_col2, m_col3 = st.columns([1, 1, 1])
-            m_col1.markdown(f"**Score:** {score:.2f}")
-            m_col2.markdown(f"**Source:** {source}")
-
-            # Placeholder for Citation Count
-            cite_ph = m_col3.empty()
-            cite_ph.caption("⏳ Loading citations...")
-
+            col_a, col_b, col_c = st.columns(3)
+            col_a.markdown(f"**Relative Score:** {row['quality']:.2f}")
+            col_b.markdown(f"**Source:** {row['source']}")
+            col_c.markdown(f"**Citations:** {citations}")
             st.markdown(f"**Authors:** {row['authors']}")
-            st.markdown(f"**Abstract:**\n{abstract}")
+            col_d, col_e = st.columns(2)
+            col_d.markdown(f"**Date:** {row['date']}")
+            col_e.markdown(f"**Journal/Server:** {row.get('journal', 'N/A')}")
+            abstracts_for_summary.append(row["abstract"])
+            st.markdown(f"**Abstract:**\n{row['abstract']}")
+            # Show links
+            link_cols = st.columns(3)
 
-            # Placeholders for Links
-            link_cols = st.columns(2)
-            full_text_ph = link_cols[0].empty()
-            publisher_ph = link_cols[1].empty()
-
-            # Store data needed for async fetch
-            metadata_placeholders.append({
-                "row": row, # Full row data
-                "cite_ph": cite_ph,
-                "full_text_ph": full_text_ph,
-                "publisher_ph": publisher_ph
-            })
-
-    # --- FETCH & FILL (Async-like) ---
-    # This runs AFTER the UI is drawn. The user sees the text immediately.
-    # The script stays "running" (spinner top right) until this completes,
-    # but the page is interactive.
-
-    def fetch_and_update(task):
-        row = task["row"]
-        doi = row["doi"]
-
-        # 1. Get Citations
-        c_count = get_citation_count_cached(doi)
-
-        # 2. Get Full Text Link
-        # Convert row to simple dict for caching
-        row_dict = {"source": row["source"], "version": row["version"], "doi": row["doi"]}
-        ft_link = get_link_info_cached(row_dict)
-
-        return task, c_count, ft_link
-
-    # Run in threads
-    if metadata_placeholders:
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(fetch_and_update, t) for t in metadata_placeholders]
-
-            for future in concurrent.futures.as_completed(futures):
-                task, c_count, ft_link = future.result()
-
-                # Update UI Elements
-                task["cite_ph"].markdown(f"**Citations:** {c_count}")
-
-                doi_link = f"https://doi.org/{task['row']['doi']}"
-                if ft_link:
-                    task["full_text_ph"].markdown(f"**[:material/import_contacts: Full Text]({ft_link})**")
-
-                task["publisher_ph"].markdown(f"**[:material/link: Publisher]({doi_link})**")
+            if has_full_text:
+                link_cols[0].markdown(f"**[:material/import_contacts: Read Full Text]({final_link})**")
+            link_cols[1].markdown(f"**[:material/link: View on Publisher Website]({doi_link})**")
         
         
     try:
@@ -1700,9 +1699,11 @@ if not final_results.empty:
         with st.spinner("Generating AI summary..."):
             ai_gen_start = time.time()
             if st.session_state.get("ai_api_provided"):
-                st.markdown("**AI Summary of abstracts:**")
+                ai_count = st.session_state.get("ai_abstracts_count", 9)
+                ai_model = st.session_state.get("ai_model_name", "gemini-2.0-flash-lite-preview-02-05")
+                st.markdown(f"**AI Summary of top {ai_count} abstracts (Model: {ai_model}):**")
                 with log_time("AI Summary Generation"):
-                    summary_text = summarize_abstract(abstracts_for_summary[:9], LLM_prompt, st.session_state["ai_api_provided"])
+                    summary_text = summarize_abstract(abstracts_for_summary[:ai_count], LLM_prompt, st.session_state["ai_api_provided"], model_name=ai_model)
                 st.markdown(summary_text)
                 LOGGER.info(summary_text)
             total_ai_time = time.time() - ai_gen_start
