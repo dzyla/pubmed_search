@@ -142,7 +142,9 @@ def get_citation_count_cached(doi_str):
     try:
         works = Works()
         paper_data = works.doi(doi_str)
-        return paper_data.get("is-referenced-by-count", 0)
+        if paper_data:
+            return paper_data.get("is-referenced-by-count", 0)
+        return 0
     except:
         return 0
 
@@ -205,7 +207,9 @@ def get_citation_count(doi_str):
     works = Works()
     try:
         paper_data = works.doi(doi_str)
-        return paper_data.get("is-referenced-by-count", 0)
+        if paper_data:
+            return paper_data.get("is-referenced-by-count", 0)
+        return 0
     except Exception as e:
         LOGGER.error(f"Error fetching citation count for {doi_str}: {e}")
         return 0
@@ -710,10 +714,14 @@ def load_data_for_indices(indices_or_hits: list, metadata: dict, folder: str, us
                         continue
                     df_subset = subset_table.to_pandas()
                     df_subset['source_file'] = os.path.basename(parquet_path)
+                    # Reset index to ensure 0-based indexing for checking validity
+                    df_subset.reset_index(drop=True, inplace=True)
                     title_valid = ('title' in df_subset.columns and
+                                   not df_subset.empty and
                                    df_subset.at[0, 'title'] is not None and
                                    str(df_subset.at[0, 'title']).strip() != "")
                     abstract_valid = ('abstract' in df_subset.columns and
+                                      not df_subset.empty and
                                       df_subset.at[0, 'abstract'] is not None and
                                       len(str(df_subset.at[0, 'abstract']).strip()) > min_abstract_length)
                     if title_valid and abstract_valid:
@@ -791,7 +799,7 @@ def create_chunked_embeddings_memmap(embeddings_directory: str,
                                      npy_files_pattern: str,
                                      chunk_dir: str,
                                      metadata_path: str,
-                                     chunk_size_bytes: int = 1 << 30):
+                                     chunk_size_bytes: int = 200 * 1024 * 1024):
     LOGGER.info("Starting creation or loading of chunked memory-mapped embeddings...")
     recreate = False
     if os.path.exists(metadata_path):
@@ -921,6 +929,9 @@ def create_chunked_embeddings_memmap(embeddings_directory: str,
             for file_info in group:
                 offsets.append(current_offset)
                 current_offset += file_info["rows"]
+            # Compressed chunks (npz) would require full loading into RAM for search,
+            # defeating the purpose of low-memory usage with mmap.
+            # Sticking to npy with smaller chunk size.
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 futures = [
                     executor.submit(copy_file_into_chunk, file_info, memmap_array, off)
@@ -1585,7 +1596,7 @@ if not final_results.empty:
         st.error(f"Error in plotting Score vs Year: {str(e)}")
     tabs = st.tabs(["Score vs Year", "Abstract Map", "References"])
     with tabs[0]:
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
     with tabs[1]:
         pumap, hist_data = load_pumap_model_and_image("param_umap_model.h5", "hist2d.npz")
         try:
@@ -1675,7 +1686,7 @@ if not final_results.empty:
             height=600,
             width=800,
         )
-        st.plotly_chart(fig_abstract_map, use_container_width=True)
+        st.plotly_chart(fig_abstract_map, width="stretch")
     
     with tabs[2]:
         st.markdown("#### References")
