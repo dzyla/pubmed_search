@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import yaml
 
 import pyarrow as pa
@@ -122,6 +124,52 @@ def get_donation_collected() -> int:
 # =============================================================================
 # SECTION 3: API and Crossref Helpers
 # =============================================================================
+
+# --- OPTIMIZATION: Global Session for faster networking ---
+def create_session():
+    session = requests.Session()
+    retry = Retry(connect=3, backoff_factor=0.5)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+GLOBAL_SESSION = create_session()
+
+# Update get_citation_count to use session and cache
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_citation_count_cached(doi_str):
+    try:
+        works = Works()
+        paper_data = works.doi(doi_str)
+        return paper_data.get("is-referenced-by-count", 0)
+    except:
+        return 0
+
+# Optimized Link Checker
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_link_info_cached(row_dict):
+    # Wrapper to return a dictionary of link data we need
+    # This prevents sending the whole dataframe row which breaks caching
+    source = row_dict.get("source", "").lower()
+    pmid = row_dict.get("version") # Assuming version holds PMID for PubMed
+    doi_val = row_dict.get("doi")
+
+    full_text = None
+    if source == "pubmed" and pmid:
+        url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={pmid}&format=json"
+        try:
+            r = GLOBAL_SESSION.get(url, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if "records" in data and "pmcid" in data["records"][0]:
+                    full_text = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{data['records'][0]['pmcid']}/"
+        except:
+            pass
+    elif "arxiv" in str(doi_val):
+        full_text = doi_val
+
+    return full_text
 
 MODEL_SERVER_URL = "http://localhost:8000/encode"
 
@@ -989,6 +1037,8 @@ def load_model() -> SentenceTransformer:
 def load_pumap_model_and_image(model_path: str, image_path: str) -> tuple:
     LOGGER.info("Loading PuMAP model and UMAP image...")
     model = load_pumap(model_path)
+    if hasattr(model, "to"):
+        model.to("cpu")
     image = np.load(image_path)
     LOGGER.info("PuMAP model and UMAP image loaded.")
     return model, image
@@ -1059,116 +1109,82 @@ def plot_embedding_network_advanced(query: str, query_embedding, final_results: 
 
 def combined_search(query: str, configs: list, top_show: int = 10, precision: str = "ubinary", use_high_quality: bool = False,
                     start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    message_holder = STATUS
-    message_holder.info("Encoding query via REST API...")
+
+    # 1. Encode Query
     query_embedding = get_query_embedding(query, normalize=True, precision=precision)
-    if query_embedding is None:
-        return pd.DataFrame()
+    if query_embedding is None: return pd.DataFrame()
     query_embedding = np.array(query_embedding, dtype=np.uint8)
-    if query_embedding.ndim == 1:
-        query_embedding = query_embedding[np.newaxis, :]
+    if query_embedding.ndim == 1: query_embedding = query_embedding[np.newaxis, :]
     st.session_state["query_embedding"] = query_embedding
 
-    with log_time("Loading PubMed chunked embeddings"):
-        pubmed_chunk_obj, pubmed_metadata = create_chunked_embeddings_memmap(
-            embeddings_directory=pubmed_config["embeddings_directory"],
-            npy_files_pattern=pubmed_config["npy_files_pattern"],
-            chunk_dir=pubmed_config["chunk_dir"],
-            metadata_path=pubmed_config["metadata_path"],
-            chunk_size_bytes=pubmed_config.get("chunk_size_bytes", 1 << 30),
-        )
-    with log_time("Loading BioRxiv chunked embeddings"):
-        biorxiv_chunk_obj, biorxiv_metadata = create_chunked_embeddings_memmap(
-            embeddings_directory=biorxiv_config["embeddings_directory"],
-            npy_files_pattern=biorxiv_config["npy_files_pattern"],
-            chunk_dir=biorxiv_config["chunk_dir"],
-            metadata_path=biorxiv_config["metadata_path"],
-            chunk_size_bytes=biorxiv_config.get("chunk_size_bytes", 1 << 30),
-        )
-    with log_time("Loading MedRxiv chunked embeddings"):
-        medrxiv_chunk_obj, medrxiv_metadata = create_chunked_embeddings_memmap(
-            embeddings_directory=medrxiv_config["embeddings_directory"],
-            npy_files_pattern=medrxiv_config["npy_files_pattern"],
-            chunk_dir=medrxiv_config["chunk_dir"],
-            metadata_path=medrxiv_config["metadata_path"],
-            chunk_size_bytes=medrxiv_config.get("chunk_size_bytes", 1 << 30),
-        )
-    with log_time("Loading arXiv chunked embeddings"):
-        arxiv_chunk_obj, arxiv_metadata = create_chunked_embeddings_memmap(
-            embeddings_directory=arxiv_config["embeddings_directory"],
-            npy_files_pattern=arxiv_config["npy_files_pattern"],
-            chunk_dir=arxiv_config["chunk_dir"],
-            metadata_path=arxiv_config["metadata_path"],
-            chunk_size_bytes=arxiv_config.get("chunk_size_bytes", 1 << 30),
-        )
+    all_dfs = []
 
-    top_k = top_show
+    # Helper to Load -> Search -> Close immediately
+    def process_source(name, config, reformat_func=None):
+        try:
+            # LOAD
+            chunk_obj, metadata = create_chunked_embeddings_memmap(
+                embeddings_directory=config["embeddings_directory"],
+                npy_files_pattern=config["npy_files_pattern"],
+                chunk_dir=config["chunk_dir"],
+                metadata_path=config["metadata_path"],
+                chunk_size_bytes=config.get("chunk_size_bytes", 536870912), # Reduced to 512MB for safety
+            )
+            # SEARCH
+            # Note: We fetch 'top_show' from EACH DB to ensure we have enough good candidates
+            _, df = perform_semantic_search_chunks_wrapper(
+                query_embedding, metadata,
+                chunk_dir=config["chunk_dir"],
+                folder=config["data_folder"],
+                precision=precision, top_k=top_show,
+                use_high_quality=use_high_quality,
+                start_date=start_date, end_date=end_date
+            )
+            # CLOSE & CLEANUP
+            chunk_obj.close()
+            del chunk_obj
+            del metadata
+            gc.collect()
 
-    with log_time("Performing PubMed semantic search"):
-        _, pubmed_df = perform_semantic_search_chunks_wrapper(
-            query_embedding, pubmed_metadata,
-            chunk_dir=pubmed_config["chunk_dir"],
-            folder=pubmed_config["data_folder"],
-            precision=precision, top_k=top_k,
-            use_high_quality=use_high_quality,
-            start_date=start_date, end_date=end_date
-        )
-    pubmed_df["source"] = "PubMed"
+            if not df.empty:
+                df["source"] = name
+                if reformat_func: df = reformat_func(df)
+                return df
+        except Exception as e:
+            LOGGER.error(f"Error in {name}: {e}")
+        return pd.DataFrame()
 
-    with log_time("Performing BioRxiv semantic search"):
-        _, biorxiv_df = perform_semantic_search_chunks_wrapper(
-            query_embedding, biorxiv_metadata,
-            chunk_dir=biorxiv_config["chunk_dir"],
-            folder=biorxiv_config["data_folder"],
-            precision=precision, top_k=top_k,
-            start_date=start_date, end_date=end_date
-        )
-    with log_time("Performing MedRxiv semantic search"):
-        _, medrxiv_df = perform_semantic_search_chunks_wrapper(
-            query_embedding, medrxiv_metadata,
-            chunk_dir=medrxiv_config["chunk_dir"],
-            folder=medrxiv_config["data_folder"],
-            precision=precision, top_k=top_k,
-            start_date=start_date, end_date=end_date
-        )
-    with log_time("Performing arXiv semantic search"):
-        _, arxiv_df = perform_semantic_search_chunks_wrapper(
-            query_embedding, arxiv_metadata,
-            chunk_dir=arxiv_config["chunk_dir"],
-            folder=arxiv_config["data_folder"],
-            precision=precision, top_k=top_k,
-            start_date=start_date, end_date=end_date
-        )
-
-    biorxiv_df = reformat_biorxiv_df(biorxiv_df)
-    biorxiv_df["source"] = "BioRxiv"
+    # Sequential execution to prevent RAM saturation
+    STATUS.info("Searching PubMed...")
+    all_dfs.append(process_source("PubMed", pubmed_config))
     
-    medrxiv_df = reformat_biorxiv_df(medrxiv_df)
-    medrxiv_df["source"] = "MedRxiv"
+    STATUS.info("Searching BioRxiv...")
+    all_dfs.append(process_source("BioRxiv", biorxiv_config, reformat_biorxiv_df))
 
-    arxiv_df = reformat_arxiv_df(arxiv_df)
-    arxiv_df["source"] = "arXiv"
+    STATUS.info("Searching MedRxiv...")
+    all_dfs.append(process_source("MedRxiv", medrxiv_config, reformat_biorxiv_df))
 
-    LOGGER.info("Combining search results from all sources...")
-    combined_df = pd.concat([pubmed_df, biorxiv_df, medrxiv_df, arxiv_df], ignore_index=True)
+    STATUS.info("Searching arXiv...")
+    all_dfs.append(process_source("arXiv", arxiv_config, reformat_arxiv_df))
+
+    STATUS.info("Ranking results...")
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    if combined_df.empty: return pd.DataFrame()
+
+    # Normalize scores
     raw_min = combined_df["score"].min()
     raw_max = combined_df["score"].max()
-    
     combined_df["quality"] = abs(combined_df["score"] - raw_max) + raw_min
     combined_df.sort_values(by="score", inplace=True)
     
+    # Deduplicate
     if combined_df["doi"].notnull().all():
         combined_df = combined_df.drop_duplicates(subset=["doi"], keep="first")
     else:
         combined_df = combined_df.drop_duplicates(subset=["title"], keep="first")
-    
-    final_results = combined_df.head(top_show).reset_index(drop=True)
-    message_holder.empty()
-    pubmed_chunk_obj.close()
-    biorxiv_chunk_obj.close()
-    medrxiv_chunk_obj.close()
-    gc.collect()
-    return final_results
+
+    STATUS.empty()
+    return combined_df.head(top_show).reset_index(drop=True)
 
 # =============================================================================
 # SECTION 8: Style, Logo, and AI Summary Functions
@@ -1419,56 +1435,16 @@ else:
 
 if not final_results.empty:
     
-    
     sort_option = col2.segmented_control(
         "Sort results by:", 
         options=["Relevance", "Publication Date", "Citations"], 
         key="sort_option"
     )
+    # Ensure sorted_results is defined
     sorted_results = st.session_state["final_results"].copy()
-    all_doi = sorted_results["doi"].tolist()
-    LOGGER.info(f"Found {all_doi} DOIs in the search results.")
 
-    # If the DOI list has changed, reset the cached values.
-    if st.session_state.get("doi_list") != all_doi:
-        st.session_state["doi_list"] = all_doi
-        st.session_state["citations"] = None
-        st.session_state["clean_doi"] = None
-        st.session_state["full_text_links"] = None
-
-    # Fetch citation counts only once.
-    if st.session_state.get("citations") is None:
-        with st.spinner("Fetching citation counts..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                all_citations = list(executor.map(get_citation_count, all_doi))
-            st.session_state["citations"] = all_citations
-    else:
-        all_citations = st.session_state["citations"]
-
-    # Clean the DOI list only once.
-    if st.session_state.get("clean_doi") is None:
-        with st.spinner("Cleaning DOI list..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                clean_doi_list = list(executor.map(get_clean_doi, all_doi))
-            st.session_state["clean_doi"] = clean_doi_list
-    else:
-        clean_doi_list = st.session_state["clean_doi"]
-
-    sorted_results["citations"] = all_citations
-    sorted_results["doi"] = clean_doi_list
-
-    st.markdown("""  
-        <style>  
-        .paper-meta { color: #666; font-size: 0.9em; margin-top: 3px; }  
-        .full-text-badge {  
-            background-color: #e1f5fe;  
-            color: #0277bd;  
-            padding: 1px 5px;  
-            border-radius: 3px;  
-            font-size: 0.8em;  
-        }  
-        </style>  
-    """, unsafe_allow_html=True)
+    # Clean DOIs upfront (fast)
+    sorted_results["doi"] = sorted_results["doi"].apply(get_clean_doi)
 
     # Sort the results.
     if sort_option == "Publication Date":
@@ -1476,60 +1452,110 @@ if not final_results.empty:
         sorted_results = sorted_results.sort_values(by="date_parsed", ascending=False).reset_index(drop=True)
         sorted_results.drop(columns=["date_parsed"], inplace=True)
     elif sort_option == "Citations":
+        # We need citations for sorting. Since we fetch them async now,
+        # this might be tricky if we want instant sort before fetch.
+        # But if the user clicks sort, we might need to wait or use cached.
+        # For now, let's assume we use what we have or fetch if needed.
+        # However, the async loop fetches them later.
+        # If we sort by citations, we probably need them.
+        # Let's check if citations are in the dataframe.
+        if "citations" not in sorted_results.columns:
+             # This part is tricky with async architecture.
+             # If we want to sort by citations, we must have them.
+             # The previous logic fetched all citations upfront.
+             # Now we fetch them in the background.
+             # If the user selects "Citations" sort, we should probably fetch them.
+             with st.spinner("Fetching citations for sorting..."):
+                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                     # Reuse the cached function
+                     citations_map = list(executor.map(get_citation_count_cached, sorted_results["doi"]))
+                 sorted_results["citations"] = citations_map
+
         sorted_results = sorted_results.sort_values(by="citations", ascending=False).reset_index(drop=True)
     else:
+        # Default relevance (score)
         sorted_results = sorted_results.sort_values(by="score", ascending=True).reset_index(drop=True)
+    
+    st.markdown(f"#### Found {len(sorted_results)} relevant abstracts")
 
-    # Precalculate full text links only once.
-    if st.session_state.get("full_text_links") is None:
-        with log_time("Fetching full text links.."):
-            sorted_results = precalculate_full_text_links_parallel(sorted_results)
-            st.session_state["full_text_links"] = sorted_results["full_text_link"].tolist()
-    else:
-        sorted_results["full_text_link"] = st.session_state["full_text_links"]
-
-    full_text_link_n = sorted_results["full_text_link"].notnull().sum()
-    col1.markdown(f"#### Search results\n:material/import_contacts: {full_text_link_n} Full, free text available")
-    
-    
-    LOGGER.info(f"Showing {int(st.session_state.get('num_to_show', 10))} results.")
-    if sorted_results.shape[0] != int(st.session_state.get("num_to_show", 10)):
-        LOGGER.warning(f"Only {sorted_results.shape[0]} results found. Please refine your search query.")
-        st.warning(f"Only {sorted_results.shape[0]} results found. Please refine your search query.")
-    
+    # List to track what needs fetching
+    metadata_placeholders = []
     abstracts_for_summary = []
+
+    # --- RENDER SKELETON (Instant) ---
     for idx, row in sorted_results.iterrows():
-        citations = row["citations"]
-        doi_link = f"https://doi.org/{row['doi']}" if "arxiv.org" not in row["doi"] else row["doi"]
-        full_text_link = row.get("full_text_link")
-        final_link = full_text_link if full_text_link is not None else doi_link
-        full_text_notification = ":material/import_contacts:" if full_text_link is not None else ""
-        has_full_text = full_text_link is not None
+        # Clean basic data
+        title = row['title']
+        abstract = row['abstract']
+        abstracts_for_summary.append(abstract)
+        date = row['date']
+        source = row['source']
+        score = row['quality']
+
+        # Expander Title (Basic info only initially)
+        expander_title = f"{idx + 1}. {title} | {date}"
         
-        expander_title = (
-            f"{idx + 1}\. {row['title']}\n\n" # type: ignore
-            f"_(Score: {row['quality']:.2f} | Date: {row['date']} | Citations: {citations})_"
-        )
-        if full_text_notification:
-            expander_title += f" | {full_text_notification}"
-
         with st.expander(expander_title):
-            col_a, col_b, col_c = st.columns(3)
-            col_a.markdown(f"**Relative Score:** {row['quality']:.2f}")
-            col_b.markdown(f"**Source:** {row['source']}")
-            col_c.markdown(f"**Citations:** {citations}")
-            st.markdown(f"**Authors:** {row['authors']}")
-            col_d, col_e = st.columns(2)
-            col_d.markdown(f"**Date:** {row['date']}")
-            col_e.markdown(f"**Journal/Server:** {row.get('journal', 'N/A')}")
-            abstracts_for_summary.append(row["abstract"])
-            st.markdown(f"**Abstract:**\n{row['abstract']}")
-            # Show links  
-            link_cols = st.columns(3)  
+            # Layout columns
+            m_col1, m_col2, m_col3 = st.columns([1, 1, 1])
+            m_col1.markdown(f"**Score:** {score:.2f}")
+            m_col2.markdown(f"**Source:** {source}")
 
-            if has_full_text:  
-                link_cols[0].markdown(f"**[:material/import_contacts: Read Full Text]({final_link})**")  
-            link_cols[1].markdown(f"**[:material/link: View on Publisher Website]({doi_link})**")
+            # Placeholder for Citation Count
+            cite_ph = m_col3.empty()
+            cite_ph.caption("⏳ Loading citations...")
+
+            st.markdown(f"**Authors:** {row['authors']}")
+            st.markdown(f"**Abstract:**\n{abstract}")
+
+            # Placeholders for Links
+            link_cols = st.columns(2)
+            full_text_ph = link_cols[0].empty()
+            publisher_ph = link_cols[1].empty()
+
+            # Store data needed for async fetch
+            metadata_placeholders.append({
+                "row": row, # Full row data
+                "cite_ph": cite_ph,
+                "full_text_ph": full_text_ph,
+                "publisher_ph": publisher_ph
+            })
+
+    # --- FETCH & FILL (Async-like) ---
+    # This runs AFTER the UI is drawn. The user sees the text immediately.
+    # The script stays "running" (spinner top right) until this completes,
+    # but the page is interactive.
+
+    def fetch_and_update(task):
+        row = task["row"]
+        doi = row["doi"]
+
+        # 1. Get Citations
+        c_count = get_citation_count_cached(doi)
+
+        # 2. Get Full Text Link
+        # Convert row to simple dict for caching
+        row_dict = {"source": row["source"], "version": row["version"], "doi": row["doi"]}
+        ft_link = get_link_info_cached(row_dict)
+
+        return task, c_count, ft_link
+
+    # Run in threads
+    if metadata_placeholders:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(fetch_and_update, t) for t in metadata_placeholders]
+
+            for future in concurrent.futures.as_completed(futures):
+                task, c_count, ft_link = future.result()
+
+                # Update UI Elements
+                task["cite_ph"].markdown(f"**Citations:** {c_count}")
+
+                doi_link = f"https://doi.org/{task['row']['doi']}"
+                if ft_link:
+                    task["full_text_ph"].markdown(f"**[:material/import_contacts: Full Text]({ft_link})**")
+
+                task["publisher_ph"].markdown(f"**[:material/link: Publisher]({doi_link})**")
         
         
     try:
