@@ -27,3 +27,4 @@ pynndescent
 umap-learn
 dill
 faiss-cpu
+rank_bm25
