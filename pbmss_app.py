@@ -31,12 +31,12 @@ from data_handler import (
 )
 from search_engine import (
     combined_search,
-    load_pumap_model_and_image,
     log_time
 )
 from ui_components import (
     define_style,
-    logo
+    logo,
+    load_pumap_model_and_image
 )
 
 # =============================================================================
