@@ -16,7 +16,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import torch
 import google.genai as genai
-from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import KMeans
 
 # Import Modules
 from data_handler import (
@@ -150,6 +150,11 @@ def chat_with_papers(abstracts, user_question, api_key, model_name="gemini-2.0-f
 # Clustering
 # =============================================================================
 def perform_clustering(df, n_clusters=5):
+    """
+    Cluster the search results (subset) to identify topics.
+    Strictly applied to the small 'final_results' dataframe (e.g. top 50),
+    NEVER the full raw dataset (>50M texts).
+    """
     if "embedding" not in df.columns or df.empty:
         return df
     try:
@@ -157,7 +162,8 @@ def perform_clustering(df, n_clusters=5):
         if len(embeddings) < n_clusters:
             n_clusters = len(embeddings)
 
-        kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=256)
+        # Use KMeans for better quality on small datasets (search results)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         labels = kmeans.fit_predict(embeddings)
         df["cluster"] = labels
         return df
