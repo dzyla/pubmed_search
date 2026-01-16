@@ -124,7 +124,6 @@ def summarize_abstract(abstracts, instructions, api_key, model_name="gemini-2.0-
         formatted_text = "\n".join(f"{idx + 1}. {abstract}" for idx, abstract in enumerate(abstracts))
         prompt = f"{instructions}\n\n{formatted_text}"
 
-        # Newer models might have different config or defaults
         config = types.GenerateContentConfig(temperature=1, top_p=0.95, top_k=64, max_output_tokens=8192)
         response = client.models.generate_content(model=model_name, contents=types.Part.from_text(text=prompt), config=config)
         return response.text
@@ -327,66 +326,63 @@ if not final_results.empty:
                  sorted_results["citations"] = citations_map
         sorted_results = sorted_results.sort_values(by="citations", ascending=False).reset_index(drop=True)
     else:
-        # Default relevance (score or rerank_score)
-        sort_col = "rerank_score" if "rerank_score" in sorted_results.columns else "score"
-        ascending_order = True if sort_col == "score" else False # lower score (distance) is better for faiss, higher is better for reranker?
-        # Wait, faiss returns score.
-        # semantic_search_faiss returns 'score'.
-        # If I used cosine similarity, higher is better. If distance, lower is better.
-        # My `combined_search` normalized score: `abs(combined_df["score"] - raw_max) + raw_min`.
-        # And sorted ascending.
-        # Reranker returns logit/prob, higher is better.
+        # Default relevance
         if "rerank_score" in sorted_results.columns:
             sorted_results = sorted_results.sort_values(by="rerank_score", ascending=False).reset_index(drop=True)
         else:
             sorted_results = sorted_results.sort_values(by="score", ascending=True).reset_index(drop=True)
 
-    # Count full text
-    ft_count = sorted_results["full_text_link"].notnull().sum() if "full_text_link" in sorted_results.columns else 0
-    # Note: full_text_link is calculated lazily in the loop below for display,
-    # but for the counter we might need it upfront or just show "Found X abstracts".
-    # Previous code pre-calculated it.
-    # To restore "Restore information about free full text available", we should pre-calculate or estimate.
-    # Since we are fetching async, we can't show the count instantly unless we fetch.
-    # But the user asked to "restore previous search behaviour" which had it.
-    # The previous "revert UI" PR calculated it upfront in parallel.
-    # I will stick to the async loop for speed but maybe show count if available?
-    # Or, if I use `precalculate_full_text_links_parallel` (which I imported), I can get it.
-    # But that blocks.
-    # Let's show the count if we have it, otherwise just the count of results.
-
-    st.markdown(f"#### Found {len(sorted_results)} relevant abstracts")
-    if "full_text_link" in sorted_results.columns:
-         ft_count = sorted_results["full_text_link"].notnull().sum()
-         st.markdown(f":material/import_contacts: **{ft_count}** Full text documents available (free)")
-
-    # Display Loop
     displayed_rows = sorted_results.to_dict('records')
+
+    # Pre-calculate metadata (citations & links) in parallel BEFORE rendering loop
+    # This ensures "Full Text Count" is accurate and UI is stable/numbered as requested.
+    with st.spinner("Fetching metadata..."):
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_idx = {}
+            for i, row in enumerate(displayed_rows):
+                future_cit = executor.submit(get_citation_count_cached, row['doi'])
+                row_dict = {"source": row.get("source"), "version": row.get("version"), "doi": row.get("doi")}
+                future_link = executor.submit(get_link_info_cached, row_dict)
+                future_to_idx[future_cit] = (i, 'citations')
+                future_to_idx[future_link] = (i, 'full_text_link')
+
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx, kind = future_to_idx[future]
+                res = future.result()
+                displayed_rows[idx][kind] = res
+
+    # Count full text (Now accurate)
+    ft_count = sum(1 for r in displayed_rows if r.get("full_text_link"))
+    st.markdown(f":material/import_contacts: **{ft_count}** Full text documents available (free)")
+
     abstracts_for_summary = []
 
-    # Track placeholders for async hydration
-    placeholders = []
-
-    # 1. Render Skeleton (Instant)
+    # Render Results
     for idx, row in enumerate(displayed_rows):
         abstracts_for_summary.append(row["abstract"])
+
+        citations = row.get("citations", 0)
+        if citations is None: citations = 0
+
+        doi_val = row["doi"]
+        doi_link = f"https://doi.org/{doi_val}" if "arxiv.org" not in str(doi_val) else doi_val
+        full_text_link = row.get("full_text_link")
+
+        final_link = full_text_link if full_text_link is not None else doi_link
+        full_text_notification = ":material/import_contacts:" if full_text_link is not None else ""
+        has_full_text = full_text_link is not None
 
         cluster_id = row.get("cluster", -1)
         cluster_badge = f" [Cluster {cluster_id}]" if cluster_id != -1 else ""
 
-        # Initial Title (No citations yet)
         expander_title = (
             f"{idx + 1}\. {row['title']}{cluster_badge}\n\n"
-            f"_(Score: {row.get('quality', 0):.2f} | Date: {row['date']})_"
+            f"_(Score: {row.get('quality', 0):.2f} | Date: {row['date']} | Citations: {citations})_"
         )
+        if full_text_notification:
+            expander_title += f" | {full_text_notification}"
 
-        # Create container
-        # We use a container to allow us to hold references to elements
-        # But st.expander is a container.
-
-        expander = st.expander(expander_title)
-        with expander:
-            # Layout
+        with st.expander(expander_title):
             col_a, col_b, col_c = st.columns(3)
 
             score_text = f"**Relative Score:** {row.get('quality', 0):.2f}"
@@ -395,11 +391,7 @@ if not final_results.empty:
 
             col_a.markdown(score_text)
             col_b.markdown(f"**Source:** {row['source']}")
-
-            # Placeholder for citations
-            cit_ph = col_c.empty()
-            cit_ph.caption("⏳ Loading citations...")
-
+            col_c.markdown(f"**Citations:** {citations}")
             st.markdown(f"**Authors:** {row['authors']}")
             col_d, col_e = st.columns(2)
             col_d.markdown(f"**Date:** {row['date']}")
@@ -407,62 +399,10 @@ if not final_results.empty:
 
             st.markdown(f"**Abstract:**\n{row['abstract']}")
 
-            # Placeholder for Links
-            link_ph = st.empty()
-
-            placeholders.append({
-                "idx": idx,
-                "row": row,
-                "expander": expander, # Streamlit expander objects are not easily updateable for title?
-                # Updating title of an existing expander is tricky in Streamlit.
-                # However, we can update content.
-                # We will update citations in content.
-                "cit_ph": cit_ph,
-                "link_ph": link_ph
-            })
-
-    # 2. Async Hydration
-    def fetch_and_update(task):
-        row = task["row"]
-        doi = row["doi"]
-        
-        # Fetch
-        c_count = get_citation_count_cached(doi)
-        row_dict = {"source": row.get("source"), "version": row.get("version"), "doi": row.get("doi")}
-        ft_link = get_link_info_cached(row_dict)
-        
-        return task, c_count, ft_link
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(fetch_and_update, p) for p in placeholders]
-
-        for future in concurrent.futures.as_completed(futures):
-            task, c_count, ft_link = future.result()
-
-            # Update UI
-            # Citations
-            task["cit_ph"].markdown(f"**Citations:** {c_count}")
-
-            # Links
-            doi_val = task["row"]["doi"]
-            doi_link = f"https://doi.org/{doi_val}" if "arxiv.org" not in str(doi_val) else doi_val
-            final_link = ft_link if ft_link is not None else doi_link
-
-            link_cols = task["link_ph"].columns(3)
-            if ft_link:
+            link_cols = st.columns(3)
+            if has_full_text:
                 link_cols[0].markdown(f"**[:material/import_contacts: Read Full Text]({final_link})**")
             link_cols[1].markdown(f"**[:material/link: View on Publisher Website]({doi_link})**")
-
-            # Note: We cannot easily update the expander label to show "Full Text" icon or citation count
-            # after it is created without rerunning.
-            # We accept this limitation of "Skeleton" UI in Streamlit: dynamic updates are inside the container.
-
-            # Update data in displayed_rows for potential CSV export or charts re-use?
-            # (Only if we needed it for something else after this loop, but charts are already drawn or will be drawn using sorted_results which is NOT updated here in real-time for the user variable, but we should update it for consistency if we move code)
-            # Actually, `sorted_results` is in session state. We should update it if we want subsequent actions (like sort by citations) to work without re-fetch.
-            # However, modifying session state dataframe in thread might be risky?
-            # Streamlit re-run model suggests we should probably just show it.
-            # If user sorts, we re-fetch (cached).
 
     # Visualizations
     try:
