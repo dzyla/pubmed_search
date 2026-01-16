@@ -1,3 +1,11 @@
 *.h5
 *.npz
 .db
+*.pyc
+__pycache__/
+.env
+.vscode/
+.ipynb_checkpoints/
+data/
+logs/
+models/
