@@ -16,10 +16,9 @@ sentence-transformers
 crossrefapi
 pyyaml
 requests
-google-generativeai
+google-genai
 pyyaml
 torch
-dropbox
 google-genai
 python-doi
 pytorch_lightning
