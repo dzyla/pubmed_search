@@ -5,6 +5,14 @@ import numpy as np
 import pandas as pd
 import re
 from utils import get_current_active_users
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+LOGGER = logging.getLogger(__name__)
 
 def define_style():
     st.markdown(
@@ -34,13 +42,14 @@ def define_style():
         unsafe_allow_html=True,
     )
 
+
 def render_logo(last_date, db_size_bio, db_size_pubmed, db_size_med, db_size_arxiv):
     active_users = get_current_active_users()
     pubmed_logo = "https://upload.wikimedia.org/wikipedia/commons/f/fb/US-NLM-PubMed-Logo.svg"
     biorxiv_logo = "https://www.biorxiv.org/sites/default/files/biorxiv_logo_homepage.png"
     medarxiv_logo = "https://www.medrxiv.org/sites/default/files/medRxiv_homepage_logo.png"
-    arxiv_logo = "https://cornell.box.com/v/arxiv-logo-svg"
-    
+    arxiv_logo = "https://upload.wikimedia.org/wikipedia/commons/7/7a/ArXiv_logo_2022.png"
+    logging.info(f"Rendering logos with sizes: PubMed={db_size_pubmed}, BioRxiv={db_size_bio}, medRxiv={db_size_med}, arXiv={db_size_arxiv} and active users: {active_users}")
     st.markdown(
         f"""
         <div style="display: flex; flex-direction: column; align-items: center; gap: 10px;">
@@ -227,7 +236,7 @@ def render_footer():
     c1.markdown(
         """
         <div style='text-align: center;'>
-            <b>[MSS] Developed by <a href="https://www.dzyla.com/" target="_blank">Dawid Zyla</a></b>
+            <b>[MSS] Developed by <a href="https://www.zylalab.org/" target="_blank">Dawid Zyla</a></b>
             |
             <a href="https://github.com/dzyla/pubmed_search" target="_blank">Source code on GitHub</a>
         </div>
