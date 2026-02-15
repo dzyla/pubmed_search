@@ -4,6 +4,7 @@ import pyarrow.dataset as ds
 import pyarrow as pa
 import logging
 import concurrent.futures
+import polars as pl
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def find_file_for_index(global_idx: int, intervals: list) -> dict:
             lo = mid + 1
     return None
 
-def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_data_file: str = None) -> pd.DataFrame:
+def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_data_file: str = None) -> pl.DataFrame:
     intervals = build_sorted_intervals_from_metadata(metadata)
     file_requests = {} 
     
@@ -55,7 +56,7 @@ def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_d
                 file_requests[fname] = []
             file_requests[fname].append((local_idx, hit))
     
-    final_rows = []
+    dfs = []
 
     def process_file_request(fname, requests):
         parquet_path = os.path.join(data_folder, f"{fname}.parquet")
@@ -65,7 +66,7 @@ def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_d
                 parquet_path = combined_data_file
             else:
                 LOGGER.error(f"Data file not found: {parquet_path}")
-                return []
+                return pl.DataFrame()
             
         local_indices = [req[0] for req in requests]
         
@@ -91,20 +92,21 @@ def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_d
             
             # 4. Fetch with projection (Speed boost + Safety)
             table = dataset.scanner(columns=columns_to_fetch).take(local_indices)
-            df = table.to_pandas()
-            # --- END FIX ---
             
-            results = []
-            for i, (_, hit_info) in enumerate(requests):
-                if i < len(df):
-                    row = df.iloc[i].to_dict()
-                    row['score'] = hit_info['score']
-                    results.append(row)
-            return results
+            # Convert to Polars DataFrame (Zero-copy from Arrow if possible)
+            df = pl.from_arrow(table)
+
+            # Add scores
+            scores = [req[1]['score'] for req in requests]
+
+            if len(df) > 0:
+                df = df.with_columns(pl.Series("score", scores))
+
+            return df
             
         except Exception as e:
             LOGGER.error(f"Error reading {parquet_path}: {e}")
-            return []
+            return pl.DataFrame()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
@@ -113,6 +115,11 @@ def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_d
         
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
-            final_rows.extend(res)
+            if not res.is_empty():
+                dfs.append(res)
             
-    return pd.DataFrame(final_rows)
+    if dfs:
+        # Use diagonal concatenation to handle varying schemas across files
+        return pl.concat(dfs, how="diagonal")
+
+    return pl.DataFrame()

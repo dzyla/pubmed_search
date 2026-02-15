@@ -26,3 +26,4 @@ pynndescent
 umap-learn
 dill
 faiss-cpu
+polars
