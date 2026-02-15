@@ -5,6 +5,7 @@ import faiss
 import logging
 import gc
 import pandas as pd
+import polars as pl
 from datetime import datetime
 from pathlib import Path
 import concurrent.futures
@@ -363,7 +364,7 @@ class ChunkedSearcher:
         Fetches full data rows for a given list of candidates (which belong to this searcher's source).
         """
         if not candidates:
-            return pd.DataFrame()
+            return pl.DataFrame()
             
         df = fetch_specific_rows(candidates, self.metadata, self.data_folder, self.combined_data_file)
         return df
@@ -436,79 +437,100 @@ def combined_search_orchestrator(query_packed, configs, top_k, start_date=None, 
         for source_name, subset in candidates_by_source.items():
              searcher = searchers[source_name]
              try:
-                 df_subset = searcher.fetch_rows(subset)
-                 if not df_subset.empty:
-                     df_subset["source"] = source_name
+                 df_subset = searcher.fetch_rows(subset) # Returns Polars DataFrame
+                 if not df_subset.is_empty():
+                     df_subset = df_subset.with_columns(pl.lit(source_name).alias("source"))
                      
                      # Normalize Columns
+                     # map lower case to actual col name
                      col_map = {c.lower(): c for c in df_subset.columns}
                      
+                     rename_map = {}
                      if "server" in col_map: 
-                         df_subset.rename(columns={col_map["server"]: "journal"}, inplace=True)
+                         rename_map[col_map["server"]] = "journal"
                      elif "journal-ref" in col_map:
-                         df_subset["journal"] = df_subset[col_map["journal-ref"]]
+                         if "journal" not in col_map:
+                             rename_map[col_map["journal-ref"]] = "journal"
                      elif "journal" not in col_map and "source_title" in col_map:
-                         df_subset["journal"] = df_subset[col_map["source_title"]]
+                         rename_map[col_map["source_title"]] = "journal"
                      
+                     if rename_map:
+                         df_subset = df_subset.rename(rename_map)
+
+                     # Check if "date" exists. If not, try others.
                      if "date" not in df_subset.columns:
-                        if "update_date" in df_subset.columns: df_subset["date"] = df_subset["update_date"]
-                        elif "posted" in df_subset.columns: df_subset["date"] = df_subset["posted"]
+                         if "update_date" in df_subset.columns:
+                             df_subset = df_subset.with_columns(pl.col("update_date").alias("date"))
+                         elif "posted" in df_subset.columns:
+                             df_subset = df_subset.with_columns(pl.col("posted").alias("date"))
 
                      required_cols = ["doi", "title", "authors", "date", "abstract", "score", "source", "journal"]
-                     for col in required_cols:
-                         if col not in df_subset.columns: df_subset[col] = None
                      
-                     batch_dfs.append(df_subset[required_cols])
+                     # Ensure required columns exist
+                     existing = set(df_subset.columns)
+                     missing = [c for c in required_cols if c not in existing]
+                     if missing:
+                         df_subset = df_subset.with_columns([pl.lit(None).alias(c) for c in missing])
+
+                     batch_dfs.append(df_subset.select(required_cols))
              except Exception as e:
                  LOGGER.error(f"Error fetching batch for {source_name}: {e}")
 
         if not batch_dfs:
             continue
             
-        combined_batch_df = pd.concat(batch_dfs, ignore_index=True)
+        combined_batch_df = pl.concat(batch_dfs, how="vertical")
         
         # --- APPLY FILTERS ---
         
         # 1. Date Filter
         if start_date and end_date:
-            date_mask = pd.to_datetime(combined_batch_df["date"], errors='coerce').between(
-                pd.to_datetime(start_date), pd.to_datetime(end_date)
+            combined_batch_df = combined_batch_df.with_columns(
+                pl.col("date").str.to_datetime(strict=False).alias("date_parsed")
             )
-            combined_batch_df = combined_batch_df[date_mask]
+
+            s_date = datetime.strptime(start_date, "%Y-%m-%d")
+            e_date = datetime.strptime(end_date, "%Y-%m-%d")
+
+            combined_batch_df = combined_batch_df.filter(
+                (pl.col("date_parsed") >= s_date) & (pl.col("date_parsed") <= e_date)
+            )
+            combined_batch_df = combined_batch_df.drop("date_parsed")
             
         # 2. Quality Filter
         if use_high_quality:
-            qual_mask = combined_batch_df["abstract"].str.len() > 75
-            qual_mask = qual_mask.fillna(False)
-            combined_batch_df = combined_batch_df[qual_mask]
+            combined_batch_df = combined_batch_df.filter(
+                pl.col("abstract").fill_null("").str.len_chars() > 75
+            )
 
         # --- LIVE DEDUPLICATION ---
-        # Only add to final list if not seen
-        for _, row in combined_batch_df.iterrows():
+        rows = combined_batch_df.to_dicts()
+
+        for row in rows:
             if len(final_valid_rows) >= top_k:
                 break
                 
             # Create unique key (DOI preferred, fallback to lower-case title)
-            doi = str(row.get('doi', '')).strip()
-            title = str(row.get('title', '')).strip().lower()
+            doi_val = str(row.get('doi') or '').strip()
+            title_val = str(row.get('title') or '').strip().lower()
             
             # Skip if we have a valid DOI we've seen
-            if doi and len(doi) > 5 and doi in seen_identifiers:
+            if doi_val and len(doi_val) > 5 and doi_val in seen_identifiers:
                 continue
             # Skip if we have no DOI but have seen this title
-            if (not doi or len(doi) < 5) and title in seen_identifiers:
+            if (not doi_val or len(doi_val) < 5) and title_val in seen_identifiers:
                 continue
                 
             # Mark as seen
-            if doi and len(doi) > 5: seen_identifiers.add(doi)
-            if title: seen_identifiers.add(title)
+            if doi_val and len(doi_val) > 5: seen_identifiers.add(doi_val)
+            if title_val: seen_identifiers.add(title_val)
             
             final_valid_rows.append(row)
 
     if not final_valid_rows:
         return pd.DataFrame()
     
-    # Convert back to DataFrame
+    # Convert back to DataFrame (Pandas)
     result_df = pd.DataFrame(final_valid_rows)
     
     # Final Heuristics (BioRxiv labeling etc)
