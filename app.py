@@ -22,6 +22,22 @@ ui_components.define_style()
 config_data = config_loader.load_configs_and_db_sizes()
 configs = config_data["configs"]
 
+# --- Automatic Update Check (Startup Only) ---
+if "updates_checked" not in st.session_state:
+    with st.spinner("Checking for new manuscript embeddings..."):
+        # Trigger check/update in background
+        any_updates = search_logic.trigger_database_updates(configs)
+        
+        if any_updates:
+            st.toast("New data detected! Database updated.", icon="🔄")
+            # Clear config cache so the UI numbers update immediately
+            config_loader.load_configs_and_db_sizes.clear()
+            # Reload fresh config data
+            config_data = config_loader.load_configs_and_db_sizes()
+            configs = config_data["configs"]
+            
+    st.session_state["updates_checked"] = True
+
 # --- Status & Logo ---
 last_biorxiv_date = utils.report_dates_from_metadata(config_data["biorxiv_config"])
 ui_components.render_logo(
