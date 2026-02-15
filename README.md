@@ -5,10 +5,65 @@ This repository provides tools and scripts to perform semantic similarity search
 ## Features
 
 * **Comprehensive Data:** Includes a large database of scientific manuscripts from PubMed, bioRxiv, and medRxiv.
-* **Semantic Search:** Employs powerful sentence embeddings to find manuscripts semantically similar to your query.
+* **Semantic Search:** Employs powerful sentence embeddings (`BAAI/bge-small-en-v1.5`) with binary quantization (8x compression) for fast and memory-efficient retrieval.
+* **High Performance:** Utilizes `Polars` for ultra-fast data loading and processing, optimized for low-resource environments (4 CPUs, 8GB RAM).
+* **AI Integration:** Includes "Chat with Results" and "AI Summary" features powered by Google Gemini to help you digest findings quickly.
 * **Efficient Chunking:** Manages large datasets efficiently using memory-mapped embedding chunks.
 * **Regular Updates:** Scripts to automatically update the manuscript database with the latest publications.
 * **Interactive Visualization:** Includes a Streamlit app for interactive search and visualization of results.
+
+## Architecture & Optimization
+
+The system is designed to run efficiently on limited hardware (4 CPUs, 8GB RAM) by employing several optimization strategies:
+
+1.  **Binary Quantization**: Embeddings are quantized to 1-bit per dimension, reducing storage and search memory by 8x.
+2.  **Memory Mapping**: Embedding chunks are memory-mapped (`mmap`) to avoid loading the entire dataset into RAM.
+3.  **Lazy Loading**: Text metadata is stored in Parquet files and only fetched for the top candidates.
+4.  **Polars Integration**: Uses `Polars` for high-performance, multi-threaded data processing during the retrieval and filtering phase.
+
+### Search Process Pseudocode
+
+```python
+# 1. Generate Query Embedding
+query_packed = model_api.encode(query) # 768-dim -> 96 bytes (Binary)
+
+# 2. Parallel Search (Chunked)
+candidates = []
+for chunk in chunks:
+    # Memory-map chunk (low RAM usage)
+    index = load_index(chunk)
+    # Search using Hamming distance
+    ids, scores = index.search(query_packed)
+    candidates.extend(ids, scores)
+
+# 3. Global Sort
+candidates.sort(by="score", descending=True)
+
+# 4. Fetch & Filter (Polars Optimized)
+final_results = []
+seen_ids = set()
+
+# Process in batches to minimize I/O spikes
+for batch in candidates.batch(50):
+    # Fetch metadata using PyArrow (Scan & Take) -> Zero-copy to Polars
+    df_batch = fetch_parquet_rows(batch.ids).to_polars()
+
+    # Filter and Deduplicate
+    df_batch = df_batch.filter(
+        (col("date") >= start_date) &
+        (col("abstract").str.len_chars() > 75)
+    )
+
+    for row in df_batch:
+        if row.doi not in seen_ids:
+            final_results.append(row)
+            seen_ids.add(row.doi)
+
+    if len(final_results) >= top_k:
+        break
+
+return final_results
+```
 
 ## Installation (using a `uv` environment)
 0. **Install `uv` (if you haven't already):**
@@ -44,7 +99,7 @@ The extraction of metadata from xml files is also not the greatest and a lot of 
 Before running the search app, you need to update the manuscript database with the latest publications. First start the embedding server by running the following command:
 
 ```bash
-python model_api.py
+python model_api_bge.py
 ```
 
 Then, you can update the database using the following scripts:
@@ -64,11 +119,11 @@ Then, you can update the database using the following scripts:
 
 1. **Start the model API:**
    ```bash
-   python model_api.py
+   python model_api_bge.py
    ```
 2. **Run the Streamlit app:**
    ```bash
-   streamlit run pbmss_app.py
+   streamlit run app.py
    ```
    This will open a web interface where you can enter your search query and explore the results.
 
