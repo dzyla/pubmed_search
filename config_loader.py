@@ -5,8 +5,8 @@ import streamlit as st
 
 LOGGER = logging.getLogger(__name__)
 
-@st.cache_data
-def load_configs_and_db_sizes(config_yaml_path="config_mss.yaml"):
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_configs_and_db_sizes(config_yaml_path="./config_mss.yaml"):
     """
     Loads the configuration YAML and calculates database sizes from metadata files.
     """
@@ -26,6 +26,7 @@ def load_configs_and_db_sizes(config_yaml_path="config_mss.yaml"):
     
     def load_db_size(metadata_path):
         try:
+            LOGGER.info(f"Loading database size from metadata: {metadata_path}")
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             return metadata.get("total_rows", 0)

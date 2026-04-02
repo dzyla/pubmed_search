@@ -1,125 +1,159 @@
 import os
-import pandas as pd
-import pyarrow.dataset as ds
-import pyarrow as pa
 import logging
 import concurrent.futures
-import polars as pl
+
+import pyarrow.dataset as ds
+import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Lock-free parquet dataset + column cache
+#
+# Maps parquet_path -> (PyArrow Dataset, columns_to_fetch list).
+#
+# Why no lock?
+#   CPython's GIL makes dict.get() and dict[k]=v atomic.  Two threads may
+#   rarely both miss the cache for the same path and both compute+store an
+#   entry — that's harmless (deterministic output, last writer wins).
+#   Every later call is a plain dict lookup with zero lock overhead.
+#
+# Memory cost: a few KB per file (schema metadata only, no row data cached).
+# ---------------------------------------------------------------------------
+_PARQUET_DATASET_CACHE: dict = {}
+
+_WISHLIST = frozenset({
+    "title", "abstract", "date", "doi", "authors",
+    "journal", "server", "journal-ref", "published", "posted", "update_date",
+})
+
+
+def _get_or_open_dataset(parquet_path: str):
+    """Returns cached (Dataset, columns_to_fetch). No lock — GIL is sufficient."""
+    entry = _PARQUET_DATASET_CACHE.get(parquet_path)
+    if entry is None:
+        dataset = ds.dataset(parquet_path, format="parquet")
+        cols = list(_WISHLIST.intersection(set(dataset.schema.names)))
+        entry = (dataset, cols)
+        _PARQUET_DATASET_CACHE[parquet_path] = entry
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Interval helpers  (result cached in ChunkedSearcher.intervals)
+# ---------------------------------------------------------------------------
+
 def build_sorted_intervals_from_metadata(metadata: dict) -> list:
     intervals = []
-    if "chunks" in metadata:
-        for chunk in metadata["chunks"]:
-            for part in chunk["parts"]:
-                part_global_start = chunk["global_start"] + part["chunk_local_start"]
-                part_global_end = chunk["global_start"] + part["chunk_local_end"] - 1
-                
-                intervals.append({
-                    "global_start": part_global_start,
-                    "global_end": part_global_end,
-                    "source_stem": part["source_stem"],
-                    "source_local_start": part["source_local_start"]
-                })
+    for chunk in metadata.get("chunks", []):
+        g_start = chunk["global_start"]
+        for part in chunk.get("parts", []):
+            intervals.append({
+                "global_start":       g_start + part["chunk_local_start"],
+                "global_end":         g_start + part["chunk_local_end"] - 1,
+                "source_stem":        part["source_stem"],
+                "source_local_start": part["source_local_start"],
+            })
     intervals.sort(key=lambda x: x["global_start"])
     return intervals
 
+
 def find_file_for_index(global_idx: int, intervals: list) -> dict:
-    lo = 0
-    hi = len(intervals) - 1
+    lo, hi = 0, len(intervals) - 1
     while lo <= hi:
         mid = (lo + hi) // 2
-        interval = intervals[mid]
-        if interval["global_start"] <= global_idx <= interval["global_end"]:
-            offset = global_idx - interval["global_start"]
-            local_idx = interval["source_local_start"] + offset
-            return {"source_stem": interval["source_stem"], "local_idx": local_idx}
-        elif global_idx < interval["global_start"]:
+        iv = intervals[mid]
+        if iv["global_start"] <= global_idx <= iv["global_end"]:
+            offset = global_idx - iv["global_start"]
+            return {
+                "source_stem": iv["source_stem"],
+                "local_idx":   iv["source_local_start"] + offset,
+            }
+        elif global_idx < iv["global_start"]:
             hi = mid - 1
         else:
             lo = mid + 1
     return None
 
-def fetch_specific_rows(hits: list, metadata: dict, data_folder: str, combined_data_file: str = None) -> pl.DataFrame:
-    intervals = build_sorted_intervals_from_metadata(metadata)
-    file_requests = {} 
-    
-    for hit in hits:
-        global_idx = hit['corpus_id']
-        location = find_file_for_index(global_idx, intervals)
-        
-        if location:
-            fname = location['source_stem']
-            local_idx = location['local_idx']
-            if fname not in file_requests:
-                file_requests[fname] = []
-            file_requests[fname].append((local_idx, hit))
-    
-    dfs = []
 
-    def process_file_request(fname, requests):
+# ---------------------------------------------------------------------------
+# Core fetch
+# ---------------------------------------------------------------------------
+
+def fetch_specific_rows(
+    hits: list,
+    metadata: dict,
+    data_folder: str,
+    combined_data_file: str = None,
+    intervals: list = None,   # pre-built by ChunkedSearcher — avoids rebuild per query
+) -> pd.DataFrame:
+    """
+    Fetches metadata rows from parquet files for the given FAISS hits.
+
+    Optimisations vs original:
+    - intervals pre-built once in ChunkedSearcher (no rebuild per call)
+    - parquet schema + column list cached lock-free (no footer re-read)
+    - to_pydict() replaces to_pandas() — skips numpy/dtype/index overhead
+      for the small per-file result tables
+    """
+    import pandas as pd  # local import keeps module-level footprint minimal
+
+    if intervals is None:
+        intervals = build_sorted_intervals_from_metadata(metadata)
+
+    # Group hits by source parquet file
+    file_requests: dict = {}
+    for hit in hits:
+        loc = find_file_for_index(hit["corpus_id"], intervals)
+        if loc:
+            file_requests.setdefault(loc["source_stem"], []).append(
+                (loc["local_idx"], hit)
+            )
+
+    if not file_requests:
+        return pd.DataFrame()
+
+    def _fetch_one(fname: str, requests: list) -> list:
         parquet_path = os.path.join(data_folder, f"{fname}.parquet")
-        
         if not os.path.exists(parquet_path):
             if combined_data_file and os.path.exists(combined_data_file):
                 parquet_path = combined_data_file
             else:
                 LOGGER.error(f"Data file not found: {parquet_path}")
-                return pl.DataFrame()
-            
-        local_indices = [req[0] for req in requests]
-        
+                return []
+
+        local_indices = [r[0] for r in requests]
         try:
-            LOGGER.info(f"Fetching data from {parquet_path}: indices {local_indices}")
-            dataset = ds.dataset(parquet_path, format="parquet")
-            
-            # --- START FIX: Dynamic Column Selection ---
-            # 1. Define a "Wishlist" of columns we might want from ANY database
-            #    We EXCLUDE "source" because we add that manually later.
-            #    We INCLUDE "server" (MedRxiv), "journal" (PubMed), "posted" (BioRxiv), etc.
-            wishlist = {
-                "title", "abstract", "date", "doi", "authors", 
-                "journal", "server", "journal-ref", "published", "posted", "update_date"
-            }
-            
-            # 2. Check what the file ACTUALLY has
-            #    dataset.schema.names gives us the list of columns in this specific file
-            available_cols = set(dataset.schema.names)
-            
-            # 3. Intersect: Fetch only what exists
-            columns_to_fetch = list(wishlist.intersection(available_cols))
-            
-            # 4. Fetch with projection (Speed boost + Safety)
+            dataset, columns_to_fetch = _get_or_open_dataset(parquet_path)
             table = dataset.scanner(columns=columns_to_fetch).take(local_indices)
-            
-            # Convert to Polars DataFrame (Zero-copy from Arrow if possible)
-            df = pl.from_arrow(table)
 
-            # Add scores
-            scores = [req[1]['score'] for req in requests]
+            # to_pydict() is faster than to_pandas() for 1-10 row tables:
+            # no numpy array allocation, no dtype inference, no DataFrame index.
+            raw = table.to_pydict()
+            results = []
+            for i, (_, hit_info) in enumerate(requests):
+                if i < len(table):
+                    row = {k: raw[k][i] for k in raw}
+                    row["score"] = hit_info["score"]
+                    results.append(row)
+            return results
 
-            if len(df) > 0:
-                df = df.with_columns(pl.Series("score", scores))
-
-            return df
-            
         except Exception as e:
             LOGGER.error(f"Error reading {parquet_path}: {e}")
-            return pl.DataFrame()
+            return []
 
+    # Fresh pool per query — same pattern as original.
+    # Persistent pools add sleeping-thread wake-up latency and compete with
+    # FAISS / Streamlit threads for CPU scheduler slots on 4-CPU hardware.
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = []
-        for fname, reqs in file_requests.items():
-            futures.append(executor.submit(process_file_request, fname, reqs))
-        
+        futures = [
+            executor.submit(_fetch_one, fname, reqs)
+            for fname, reqs in file_requests.items()
+        ]
+        final_rows: list = []
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
-            if not res.is_empty():
-                dfs.append(res)
-            
-    if dfs:
-        # Use diagonal concatenation to handle varying schemas across files
-        return pl.concat(dfs, how="diagonal")
+            if res:
+                final_rows.extend(res)
 
-    return pl.DataFrame()
+    return pd.DataFrame(final_rows)
