@@ -384,6 +384,10 @@ def _compute_stats() -> dict:
         except Exception:
             pass
         searcher = _SEARCHER_CACHE.get(cfg.get("chunk_dir"))
+        if searcher is not None and searcher.superseded_count:
+            # count unique papers, not the older record versions that search hides
+            info["papers"] -= searcher.superseded_count
+            info["older_versions_hidden"] = searcher.superseded_count
         if searcher is not None and searcher.data_problem:
             info["available"] = False
             info["problem"] = searcher.data_problem
