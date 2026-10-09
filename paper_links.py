@@ -5,6 +5,9 @@ Pure string logic on a result row (dict or pandas Series) — no network.
 import re
 
 _PREPRINT_SERVERS = {"BioRxiv": "biorxiv", "MedRxiv": "medrxiv"}
+# Trial statuses worth a label (others, e.g. "Unknown", are left out).
+_TRIAL_STATUS_LABELS = {"Recruiting", "Not yet recruiting", "Active, not recruiting",
+                        "Enrolling by invitation", "Completed", "Terminated", "Withdrawn", "Suspended"}
 
 # PubMed publication types worth surfacing, in display order.
 _TYPE_BADGES = [
@@ -41,6 +44,13 @@ def build_links(row) -> list:
     doi = _clean(row.get("doi"))
     source = _clean(row.get("source"))
 
+    nct = _clean(row.get("nct_id"))
+    if nct:
+        links.append(("ClinicalTrials.gov", f"https://clinicaltrials.gov/study/{nct}"))
+        for pmid in [p.strip() for p in _clean(row.get("pmids")).split(";") if p.strip().isdigit()][:2]:
+            links.append(("Publication", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
+        return links
+
     if "arxiv.org" in doi:
         links.append(("arXiv", doi))
         links.append(("PDF", doi.replace("/abs/", "/pdf/")))
@@ -75,6 +85,14 @@ def primary_link(row):
 
 def badges(row) -> list:
     """Short labels for notable publication types; 'Retracted' always comes first."""
+    if _clean(row.get("nct_id")):
+        labels = [p for p in _clean(row.get("trial_phase")).split("/") if p]
+        status = _clean(row.get("trial_status"))
+        if status in _TRIAL_STATUS_LABELS:
+            labels.append(status)
+        if str(row.get("has_results")).lower() == "true":
+            labels.append("Has results")
+        return labels
     types = _publication_types(row)
     labels = [label for name, label in _TYPE_BADGES if name in types]
     if is_retracted(row) and "Retracted" not in labels:

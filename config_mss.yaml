@@ -32,3 +32,11 @@ arxiv_config:
   metadata_path: "/root/pubmed_semantic_search/arxiv_chunked_memmap_metadata.json"
   data_folder: "/root/pubmed_semantic_search/arxiv_df/"
   chunk_size_bytes: 1073741824
+
+clinicaltrials_config:
+  embeddings_directory: "/root/pubmed_semantic_search/clinicaltrials_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "/root/chunked/chunked_clinicaltrials_embeddings/"
+  metadata_path: "/root/pubmed_semantic_search/clinicaltrials_chunked_memmap_metadata.json"
+  data_folder: "/root/pubmed_semantic_search/clinicaltrials_df/"
+  chunk_size_bytes: 1073741824

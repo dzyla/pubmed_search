@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
-_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv")
+_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials")
 
 # ---------------------------------------------------------------------------
 # Module-level caches — shared across all Streamlit sessions / reruns
@@ -824,6 +824,8 @@ class ChunkedSearcher:
 RESULT_COLUMNS = [
     "doi", "title", "authors", "date", "abstract", "score", "source", "journal",
     "pmid", "pub_type", "published_doi", "version",
+    # ClinicalTrials.gov
+    "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
 ]
 
 
@@ -854,7 +856,8 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
     version is kept in the better-ranked slot and the preprint DOI is recorded
     on it as preprint_doi. Returns True if appended.
     """
-    doi = _norm_doi(row.get("doi"))
+    # Trials have no DOI; their registry id identifies them.
+    doi = _norm_doi(row.get("doi")) or str(row.get("nct_id") or "").strip().lower()
     published = _norm_doi(row.get("published_doi"))
     title = str(row.get("title") or "").strip().lower()
     title_key = _title_key(title)

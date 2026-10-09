@@ -1,7 +1,7 @@
 import yaml
 
 # Order matters: search_logic._SOURCE_NAMES zips over this list.
-SOURCE_KEYS = ("pubmed_config", "biorxiv_config", "medrxiv_config", "arxiv_config")
+SOURCE_KEYS = ("pubmed_config", "biorxiv_config", "medrxiv_config", "arxiv_config", "clinicaltrials_config")
 
 
 def read_source_configs(config_yaml_path: str) -> dict:

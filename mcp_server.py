@@ -12,15 +12,17 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-SOURCES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv")
+SOURCES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials")
 
 INSTRUCTIONS = (
-    "Manuscript Search: semantic search over ~49 million scientific abstracts from "
-    "PubMed, bioRxiv, medRxiv and arXiv. Describe what you are looking for in natural "
+    "Manuscript Search: semantic search over ~50 million scientific abstracts and "
+    "clinical trial registrations from PubMed, bioRxiv, medRxiv, arXiv and "
+    "ClinicalTrials.gov. Describe what you are looking for in natural "
     "language (a sentence, a research question, or a pasted abstract); bare keyword "
     "lists work worse. Each result has title, authors, date, journal, abstract, a "
     "relevance score, links (DOI, PubMed, PDF) and labels such as Retracted, Review, "
-    "Meta-analysis, RCT or Preprint. Always surface the 'Retracted' label to the user."
+    "Meta-analysis, RCT or Preprint; trials carry their phase and recruitment status. "
+    "Always surface the 'Retracted' label to the user."
 )
 
 
@@ -71,7 +73,7 @@ def build_mcp(search: SearchFn, stats: StatsFn, max_top_k: int = 10) -> FastMCP:
             top_k: Number of results, 1-10.
             start_date: Only papers published on/after this date (YYYY-MM-DD).
             end_date: Only papers published on/before this date (YYYY-MM-DD).
-            sources: Subset of ["PubMed", "BioRxiv", "MedRxiv", "arXiv"]; all if omitted.
+            sources: Subset of ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials"]; all if omitted.
             include_abstracts: Set false for a compact list (titles, links, labels only).
         """
         if not 3 <= len(query.strip()) <= 2000:
