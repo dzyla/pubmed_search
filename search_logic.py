@@ -168,6 +168,19 @@ def warm_up_indexes(configs, background: bool = True):
 # Chunk creation helpers
 # ---------------------------------------------------------------------------
 
+def _write_json_atomic(path: str, data: dict):
+    """
+    Writes JSON via a temp file + os.replace so readers in other processes
+    (Streamlit and search_api share these files) never see a half-written file.
+    """
+    tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 def copy_file_into_chunk(file_info, memmap_array, offset):
     """Copies a source .npy file into the large memory-mapped chunk."""
     try:
@@ -209,13 +222,23 @@ class ChunkedSearcher:
     # Metadata
     # ------------------------------------------------------------------
 
+    def _read_metadata_file(self, attempts: int = 3, delay_s: float = 0.5):
+        """
+        Reads the metadata JSON, retrying briefly so a file caught mid-write by
+        another process is not mistaken for a corrupt one. Returns None on failure.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                with open(self.metadata_path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                if attempt == attempts:
+                    LOGGER.error(f"Failed to load metadata at {self.metadata_path}: {e}")
+                    return None
+                time.sleep(delay_s)
+
     def _load_metadata(self):
-        try:
-            with open(self.metadata_path, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            LOGGER.error(f"Failed to load metadata at {self.metadata_path}: {e}")
-            return {}
+        return self._read_metadata_file() or {}
 
     def _current_meta_mtime(self) -> float:
         try:
@@ -233,7 +256,12 @@ class ChunkedSearcher:
             LOGGER.info(
                 f"Metadata file externally modified ({self.metadata_path}) — reloading."
             )
-            self.metadata = self._load_metadata()
+            new_metadata = self._read_metadata_file()
+            if not new_metadata or "chunks" not in new_metadata:
+                # Keep serving the current index; retry on the next check.
+                LOGGER.warning("Reloaded metadata is unreadable — keeping the current index.")
+                return False
+            self.metadata = new_metadata
             self._meta_mtime = current_mtime
             self.intervals = build_sorted_intervals_from_metadata(self.metadata)
             _clear_index_cache_for_dir(self.chunk_dir)
@@ -270,25 +298,23 @@ class ChunkedSearcher:
             self._full_regeneration()
             return
 
-        try:
-            with open(self.metadata_path, "r") as f:
-                meta = json.load(f)
-
-            if "embedding_dim" not in meta or "chunks" not in meta:
-                LOGGER.warning("Metadata invalid. Performing FULL regeneration.")
-                self._full_regeneration()
-                return
-
-            for chunk in meta.get("chunks", []):
-                c_path = os.path.join(self.chunk_dir, chunk["chunk_file"])
-                if not os.path.exists(c_path):
-                    LOGGER.warning(f"Missing chunk file: {c_path}. Performing FULL regeneration.")
-                    self._full_regeneration()
-                    return
-        except Exception as e:
-            LOGGER.warning(f"Error reading metadata: {e}. Performing FULL regeneration.")
+        meta = self._read_metadata_file()
+        if meta is None:
+            LOGGER.warning("Metadata unreadable after retries. Performing FULL regeneration.")
             self._full_regeneration()
             return
+
+        if "embedding_dim" not in meta or "chunks" not in meta:
+            LOGGER.warning("Metadata invalid. Performing FULL regeneration.")
+            self._full_regeneration()
+            return
+
+        for chunk in meta.get("chunks", []):
+            c_path = os.path.join(self.chunk_dir, chunk["chunk_file"])
+            if not os.path.exists(c_path):
+                LOGGER.warning(f"Missing chunk file: {c_path}. Performing FULL regeneration.")
+                self._full_regeneration()
+                return
 
         # Detect new or modified source files
         try:
@@ -531,8 +557,7 @@ class ChunkedSearcher:
                     f"(free capacity={capacity:,}). Extending instead of creating new chunk."
                 )
                 if self._extend_last_chunk(new_file_infos, meta, embedding_dim):
-                    with open(self.metadata_path, "w") as f:
-                        json.dump(meta, f, indent=4)
+                    _write_json_atomic(self.metadata_path, meta)
                     self._meta_mtime = self._current_meta_mtime()
                     LOGGER.info(f"Extension complete. Total rows: {meta['total_rows']:,}")
                     self.was_updated = True
@@ -560,8 +585,7 @@ class ChunkedSearcher:
         meta["chunks"].extend(added_chunks)
         meta["total_rows"] = final_global
 
-        with open(self.metadata_path, "w") as f:
-            json.dump(meta, f, indent=4)
+        _write_json_atomic(self.metadata_path, meta)
 
         self._meta_mtime = self._current_meta_mtime()
         LOGGER.info(f"Incremental update complete. Added {len(added_chunks)} chunks, {new_rows_count:,} rows.")
@@ -647,8 +671,7 @@ class ChunkedSearcher:
             "chunks": chunks_metadata,
         }
 
-        with open(self.metadata_path, "w") as f:
-            json.dump(final_metadata, f, indent=4)
+        _write_json_atomic(self.metadata_path, final_metadata)
 
         self._meta_mtime = self._current_meta_mtime()
         LOGGER.info(f"Full regeneration complete. Metadata saved to {self.metadata_path}")
@@ -839,13 +862,20 @@ def combined_search_orchestrator(
         if not batch_dfs:
             continue
 
-        combined_batch_df = pd.concat(batch_dfs, ignore_index=True)
+        # Rows come back grouped by parquet file in completion order; restore score
+        # order so the top_k cut-off and dedup keep the best-scoring rows.
+        combined_batch_df = pd.concat(batch_dfs, ignore_index=True).sort_values(
+            "score", ascending=False, kind="stable"
+        )
 
-        # Date filter
-        if start_date and end_date:
-            date_mask = pd.to_datetime(combined_batch_df["date"], errors="coerce").between(
-                pd.to_datetime(start_date), pd.to_datetime(end_date)
-            )
+        # Date filter (either bound may be given alone)
+        if start_date or end_date:
+            dates = pd.to_datetime(combined_batch_df["date"], errors="coerce")
+            date_mask = dates.notna()
+            if start_date:
+                date_mask &= dates >= pd.to_datetime(start_date)
+            if end_date:
+                date_mask &= dates <= pd.to_datetime(end_date)
             combined_batch_df = combined_batch_df[date_mask]
 
         # Quality filter
