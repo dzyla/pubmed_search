@@ -48,9 +48,14 @@ import re
 import time
 from datetime import date, datetime
 
+import sys
+
 import numpy as np
 import pandas as pd
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from textlang import is_english  # noqa: E402
 
 EPMC_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_POST_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/searchPOST"
@@ -489,7 +494,12 @@ def _atomic_npy(arr: np.ndarray, path: str):
 
 
 def write_chunk(df: pd.DataFrame, df_dir: str, emb_dir: str, stem: str) -> str:
-    df = df.reset_index(drop=True)
+    # The embedding model is English-only; non-English abstracts (mostly SciELO,
+    # some PsyArXiv/OSF) would only add noise to the index.
+    english = (df["title"].fillna("") + ". " + df["abstract"].fillna("")).map(is_english)
+    if (~english).any():
+        print(f"  skipping {int((~english).sum()):,} non-English preprint(s)")
+    df = df[english].reset_index(drop=True)
     bits = embed(df)
     path = os.path.join(df_dir, stem + ".parquet")
     _atomic_parquet(df, path)                                         # metadata first
