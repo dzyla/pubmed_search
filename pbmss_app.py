@@ -90,10 +90,15 @@ def render_chat_interface(sorted_results, ai_api_key):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+
+    # Answer the last user turn if it has no reply yet — covers both a typed
+    # prompt and a suggested-question click (which only appends and reruns).
+    history = st.session_state.chat_history
+    if history and history[-1]["role"] == "user":
         with st.chat_message("assistant"):
             with st.spinner("Thinking…"):
                 response_text = gemini_handler.chat_with_context(
-                    st.session_state.chat_history, prompt, sorted_results, ai_api_key
+                    history, history[-1]["content"], sorted_results, ai_api_key
                 )
                 st.markdown(response_text)
                 st.session_state.chat_history.append({"role": "assistant", "content": response_text})
