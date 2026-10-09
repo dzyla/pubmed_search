@@ -294,3 +294,17 @@ def test_source_returns_once_files_match_again(tmp_path):
                   "server": ["biorxiv"] * 120}).to_parquet(config["combined_data_file"])
     assert searcher.check_for_updates() is True
     assert searcher.data_problem is None
+
+
+def test_parquet_rewritten_in_place_is_reread(tmp_path):
+    import data_handler
+
+    path = str(tmp_path / "f.parquet")
+    pd.DataFrame({"title": ["old"] * 3, "abstract": ["a"] * 3}).to_parquet(path)
+    first, _ = data_handler._get_or_open_dataset(path)
+    assert first.to_table().column("title").to_pylist() == ["old"] * 3
+
+    pd.DataFrame({"title": ["new title"] * 5, "abstract": ["b"] * 5}).to_parquet(path)
+    os.utime(path, (2e9, 2e9))
+    second, _ = data_handler._get_or_open_dataset(path)
+    assert second.to_table().column("title").to_pylist() == ["new title"] * 5

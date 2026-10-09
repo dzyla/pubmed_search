@@ -20,8 +20,12 @@ import paper_links
 LOGGER = logging.getLogger(__name__)
 
 INK, EOSIN, MUTED, RULE, GLASS = "#2A2250", "#C8336B", "#6D6884", "#DDD9E8", "#F4F3F8"
-SOURCE_COLORS = {"PubMed": INK, "BioRxiv": EOSIN, "MedRxiv": "#7A6FB0", "arXiv": "#B7832F"}
-SOURCE_NAMES = {"PubMed": "PubMed", "BioRxiv": "bioRxiv", "MedRxiv": "medRxiv", "arXiv": "arXiv"}
+# Methyl green (a classic counterstain) for trials, keeping the histology palette.
+SOURCE_COLORS = {"PubMed": INK, "BioRxiv": EOSIN, "MedRxiv": "#7A6FB0", "arXiv": "#B7832F",
+                 "ClinicalTrials": "#3E7D63"}
+SOURCE_NAMES = {"PubMed": "PubMed", "BioRxiv": "bioRxiv", "MedRxiv": "medRxiv", "arXiv": "arXiv",
+                "ClinicalTrials": "ClinicalTrials.gov"}
+_NO_CITATIONS = {"arXiv", "ClinicalTrials"}   # no Crossref DOI to count citations for
 _SERVER_NAMES = {"biorxiv": "bioRxiv", "medrxiv": "medRxiv"}
 
 _CSS = f"""
@@ -125,7 +129,8 @@ def render_header(stats: dict, active_users: int):
     names = [SOURCE_NAMES.get(s, s) for s in sources] or list(SOURCE_NAMES.values())
     listed = ", ".join(names[:-1]) + (" and " if len(names) > 1 else "") + names[-1]
     lead = (f"Describe a finding, a question or paste an abstract. We search "
-            f"<strong>{total:,}</strong> abstracts from {listed} by meaning, not keywords."
+            f"<strong>{total:,}</strong> abstracts and trial registrations from {listed} "
+            f"by meaning, not keywords."
             if total else
             f"Describe a finding, a question or paste an abstract. We search abstracts from "
             f"{listed} by meaning, not keywords.")
@@ -231,9 +236,11 @@ def render_entry(row, rank: int, citations, top_score: float):
     facts = [f'<span class="mss-src" style="color:{SOURCE_COLORS.get(source, INK)}">'
              f'{_e(SOURCE_NAMES.get(source, source))}</span>']
     facts += [f'<span class="mss-tag">{_e(lab)}</span>' for lab in labels]
-    if citations is None:
+    if source in _NO_CITATIONS:
+        pass
+    elif citations is None:
         facts.append("<span>counting citations…</span>")
-    elif source != "arXiv":
+    else:
         facts.append(f"<span>cited {int(citations):,} time{'s' if citations != 1 else ''}</span>")
     facts.append(f'<span class="mss-meter" title="Relevance relative to the best match '
                  f'(similarity {score:.3f})" aria-hidden="true"><span style="width:{pct}%"></span></span>')
@@ -333,6 +340,13 @@ def generate_bibtex(df: pd.DataFrame) -> str:
         if journal.lower() in ("nan", "", "n/a"):
             journal = source.capitalize()
 
+        if source == "clinicaltrials":
+            url = _row_url(row) or ""
+            entries.append(f"@misc{{{key},\n  author = {{{authors}}},\n  title = {{{title}}},\n"
+                           f"  howpublished = {{ClinicalTrials.gov, {row.get('nct_id', '')}}},\n"
+                           f"  year = {{{year}}},\n  url = {{{url}}},\n}}\n")
+            continue
+
         entry = f"@article{{{key},\n"
         entry += f"  author = {{{authors}}},\n"
         entry += f"  title = {{{title}}},\n"
@@ -352,8 +366,9 @@ def generate_ris(df: pd.DataFrame) -> str:
     """RIS export (Zotero, EndNote, Mendeley)."""
     records = []
     for _, row in df.iterrows():
-        is_preprint = str(row.get("source", "")) in ("BioRxiv", "MedRxiv", "arXiv")
-        lines = [f"TY  - {'UNPB' if is_preprint else 'JOUR'}"]
+        source = str(row.get("source", ""))
+        ris_type = {"BioRxiv": "UNPB", "MedRxiv": "UNPB", "arXiv": "UNPB", "ClinicalTrials": "GEN"}.get(source, "JOUR")
+        lines = [f"TY  - {ris_type}"]
         lines.append(f"TI  - {row.get('title', '')}")
         for author in re.split(r"\s*;\s*", str(row.get("authors") or "")):
             if author and author != "N/A":

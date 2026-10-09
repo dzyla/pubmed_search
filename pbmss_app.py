@@ -28,7 +28,7 @@ import ui_data
 
 LOGGER = logging.getLogger(__name__)
 
-SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv"]
+SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials"]
 SOURCE_LABELS = ui_components.SOURCE_NAMES
 
 st.set_page_config(page_title="Manuscript Search", page_icon="📜", layout="centered")

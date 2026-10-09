@@ -26,18 +26,25 @@ _WISHLIST = frozenset({
     "title", "abstract", "date", "doi", "authors",
     "journal", "server", "journal-ref", "published", "posted", "update_date",
     "pmid", "type", "version",
+    "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
 })
 
 
 def _get_or_open_dataset(parquet_path: str):
-    """Returns cached (Dataset, columns_to_fetch). No lock — GIL is sufficient."""
+    """
+    Returns cached (Dataset, columns_to_fetch). No lock — GIL is sufficient.
+    Re-opens the file when its size or mtime changed (e.g. a weekly update
+    rewrote it in place): a stale Dataset would read with old row-group offsets.
+    """
+    st = os.stat(parquet_path)
+    signature = (st.st_mtime_ns, st.st_size)
     entry = _PARQUET_DATASET_CACHE.get(parquet_path)
-    if entry is None:
+    if entry is None or entry[2] != signature:
         dataset = ds.dataset(parquet_path, format="parquet")
         cols = list(_WISHLIST.intersection(set(dataset.schema.names)))
-        entry = (dataset, cols)
+        entry = (dataset, cols, signature)
         _PARQUET_DATASET_CACHE[parquet_path] = entry
-    return entry
+    return entry[0], entry[1]
 
 
 def clear_parquet_cache():
