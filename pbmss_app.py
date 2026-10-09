@@ -1,4 +1,5 @@
 import logging
+import sys
 import streamlit as st
 import pandas as pd
 import concurrent.futures
@@ -26,8 +27,6 @@ ui_components.define_style()
 
 # --- Config path: CLI arg > default production path ---
 # Run with:  streamlit run pbmss_app.py -- --config ./config_mss.yaml
-import sys
-
 _DEFAULT_CONFIG = str(Path(__file__).parent / "config_mss.yaml")
 _config_path = _DEFAULT_CONFIG
 _args = sys.argv[1:]  # Streamlit strips its own flags; remaining args are ours
@@ -247,9 +246,7 @@ if not final_results.empty:
 
     # Clean DOIs (fast, no network)
     if st.session_state.get("clean_doi") is None:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            clean_doi_list = list(executor.map(utils.get_clean_doi, all_doi))
-        st.session_state["clean_doi"] = clean_doi_list
+        st.session_state["clean_doi"] = [utils.get_clean_doi(d) for d in all_doi]
     sorted_results["doi"] = st.session_state["clean_doi"]
 
     # Full-text links (fast, no network)

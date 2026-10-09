@@ -185,18 +185,6 @@ def plot_score_vs_year(sorted_results: pd.DataFrame) -> go.Figure:
         df["citations"] = pd.to_numeric(df.get("citations", 0), errors="coerce").fillna(0)
         df["marker_size"] = np.log1p(df["citations"]) * 5 + 5
 
-        # Build hover text
-        df["hover"] = df.apply(
-            lambda r: (
-                f"<b>{r['title']}</b><br>"
-                f"Source: {r['source']}<br>"
-                f"Score: {r['score']:.3f}<br>"
-                f"Citations: {int(r['citations'])}<br>"
-                f"DOI: {r['doi']}"
-            ),
-            axis=1,
-        )
-
         fig = px.scatter(
             df,
             x="Date_Plot",
