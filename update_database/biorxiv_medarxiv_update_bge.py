@@ -536,7 +536,10 @@ def process_source(source, model, override_start: datetime | None = None):
             final_embeddings = new_binary_embeddings
             
         print(f"[{name}] Saving Master DB with {len(final_df):,} records...")
-        final_df.to_parquet(meta_path)
+        # Small row groups: the search app reads a few rows per query, and a
+        # single 357k-row group made every bioRxiv fetch decode the whole file
+        # (1.3 s -> 0.15 s per fetch with 2,000-row groups).
+        final_df.to_parquet(meta_path, row_group_size=2000, write_page_index=True)
         np.save(embed_path, final_embeddings)
     else:
         print(f"[{name}] All fetched data was duplicate.")

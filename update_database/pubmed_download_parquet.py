@@ -389,7 +389,7 @@ def efficient_process_xml_file(filename):
 
     return df
 
-def save_optimized_parquet(df, parquet_file, row_group_size=10000):
+def save_optimized_parquet(df, parquet_file, row_group_size=2000):
     """Save DataFrame to an optimized Parquet file."""
     os.makedirs(os.path.dirname(parquet_file), exist_ok=True)
     
