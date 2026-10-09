@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import numpy as np
@@ -800,6 +801,12 @@ def _norm_doi(value) -> str:
     return doi if len(doi) > 5 and doi not in ("none", "nan") else ""
 
 
+def _title_key(title) -> str:
+    """Normalized title for matching a preprint with its journal version."""
+    key = re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+    return key if len(key) >= 30 else ""     # short titles ("Reply", "Editorial") are not unique
+
+
 def _is_preprint(row: dict) -> bool:
     return _norm_doi(row.get("doi")).startswith("10.1101/") or row.get("source") in ("BioRxiv", "MedRxiv")
 
@@ -808,21 +815,30 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
     """
     Appends row to rows unless it duplicates one already kept (same DOI, or same
     title when it has no DOI). A preprint and its journal version count as
-    duplicates: the published version is kept in the better-ranked slot and the
-    preprint DOI is recorded on it as preprint_doi. Returns True if appended.
+    duplicates — matched by the preprint's published DOI or, when the preprint
+    record predates publication, by identical normalized title. The published
+    version is kept in the better-ranked slot and the preprint DOI is recorded
+    on it as preprint_doi. Returns True if appended.
     """
     doi = _norm_doi(row.get("doi"))
     published = _norm_doi(row.get("published_doi"))
     title = str(row.get("title") or "").strip().lower()
+    title_key = _title_key(title)
     ids = [i for i in (doi, published) if i]
 
     existing = next((seen[i] for i in ids if i in seen), None)
     if existing is None and not doi and title in seen:
         existing = seen[title]
+    same_work_by_title = False
+    if existing is None and title_key and f"t:{title_key}" in seen:
+        candidate = seen[f"t:{title_key}"]
+        if _is_preprint(rows[candidate]) != _is_preprint(row):
+            existing, same_work_by_title = candidate, True
 
     if existing is not None:
         kept = rows[existing]
-        if _is_preprint(kept) and not _is_preprint(row) and doi and doi == _norm_doi(kept.get("published_doi")):
+        if _is_preprint(kept) and not _is_preprint(row) and (
+                same_work_by_title or (doi and doi == _norm_doi(kept.get("published_doi")))):
             # Kept a preprint whose published version just showed up: swap them,
             # keeping the preprint's (higher) score so the slot's rank is unchanged.
             merged = dict(row, score=kept["score"], preprint_doi=kept.get("doi"))
@@ -830,12 +846,12 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
             for i in (doi, title):
                 if i:
                     seen[i] = existing
-        elif _is_preprint(row) and published and published == _norm_doi(kept.get("doi")):
+        elif _is_preprint(row) and (same_work_by_title or (published and published == _norm_doi(kept.get("doi")))):
             kept.setdefault("preprint_doi", row.get("doi"))
         return False
 
     rows.append(row)
-    for i in ids + ([title] if title else []):
+    for i in ids + ([title] if title else []) + ([f"t:{title_key}"] if title_key else []):
         seen.setdefault(i, len(rows) - 1)
     return True
 

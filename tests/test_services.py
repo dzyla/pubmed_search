@@ -179,7 +179,7 @@ def test_mcp_accepts_bearer_token(backend):
 # ---------------------------------------------------------------------------
 
 def test_active_users_migrates_legacy_table(tmp_path, monkeypatch):
-    import utils
+    import ui_data
 
     db = tmp_path / "sessions.db"
     with sqlite3.connect(db) as conn:
@@ -192,9 +192,9 @@ def test_active_users_migrates_legacy_table(tmp_path, monkeypatch):
         __getattr__ = dict.__getitem__
         __setattr__ = dict.__setitem__
 
-    monkeypatch.setattr(utils.st, "session_state", FakeSessionState())
-    assert utils.get_current_active_users(str(db)) == 1
+    monkeypatch.setattr(ui_data.st, "session_state", FakeSessionState())
+    assert ui_data.get_current_active_users(str(db)) == 1
     # A second session is counted, and the same session is not double-counted.
-    monkeypatch.setattr(utils.st, "session_state", FakeSessionState())
-    assert utils.get_current_active_users(str(db)) == 2
-    assert utils.get_current_active_users(str(db)) == 2
+    monkeypatch.setattr(ui_data.st, "session_state", FakeSessionState())
+    assert ui_data.get_current_active_users(str(db)) == 2
+    assert ui_data.get_current_active_users(str(db)) == 2

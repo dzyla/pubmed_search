@@ -1,0 +1,29 @@
+# Manuscript Search theme — colours from histology's H&E stain:
+# hematoxylin ink on slide glass, eosin as the single accent.
+[theme]
+base = "light"
+backgroundColor = "#F4F3F8"            # slide glass
+secondaryBackgroundColor = "#E9E6F1"
+textColor = "#2A2250"                  # hematoxylin
+primaryColor = "#C8336B"               # eosin
+linkColor = "#4A3A8C"
+linkUnderline = false
+borderColor = "#DDD9E8"
+showWidgetBorder = true
+redColor = "#B42318"
+baseRadius = "0.3rem"
+buttonRadius = "0.3rem"
+font = "Instrument Sans:https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap, sans-serif"
+headingFont = "Newsreader:https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap, serif"
+headingFontWeights = [500, 500, 500]
+baseFontSize = 16
+chartCategoricalColors = ["#2A2250", "#C8336B", "#7A6FB0", "#B7832F"]
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+
+[client]
+toolbarMode = "minimal"
