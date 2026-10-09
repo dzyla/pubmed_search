@@ -102,6 +102,9 @@ def encode(request: QueryRequest):
 
     return {
         "embedding": packed_uint8[0].tolist(),
+        # Float query for rescoring binary candidates (search_logic); clients
+        # that only read "embedding" are unaffected.
+        "embedding_float": np.round(emb_float[0], 6).tolist(),
         "model": MODEL_ID
     }
 

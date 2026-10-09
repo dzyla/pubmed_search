@@ -14,7 +14,7 @@ logging.basicConfig(
 
 import config_loader
 import utils
-from api_handler import get_query_embedding_packed, EmbeddingError
+from api_handler import get_query_embeddings, EmbeddingError
 import search_logic
 import ui_components
 import gemini_handler
@@ -202,7 +202,7 @@ if submitted and query:
 
         st.write(":material/model_training: Encoding query…")
         try:
-            query_packed = get_query_embedding_packed(query)
+            query_packed, query_float = get_query_embeddings(query)
         except EmbeddingError as exc:
             st.error(str(exc))
             status.update(label="Embedding failed.", state="error", expanded=False)
@@ -217,6 +217,7 @@ if submitted and query:
                 start_date=start_date_str,
                 end_date=end_date_str,
                 use_high_quality=use_high_quality,
+                query_float=query_float,
             )
             elapsed = (datetime.now() - t0).total_seconds()
             status.update(

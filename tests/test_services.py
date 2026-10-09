@@ -20,8 +20,8 @@ def api(corpus, monkeypatch):
     monkeypatch.setattr(search_api, "CONFIGS", [config, {}, {}, {}])
     monkeypatch.setattr(search_api, "VALID_KEYS", {"test-key"})
     monkeypatch.setattr(
-        search_api, "get_query_embedding_packed",
-        lambda query, server_url: np.zeros((1, EMB_BYTES), dtype=np.uint8),
+        search_api, "get_query_embeddings",
+        lambda query, server_url: (np.zeros((1, EMB_BYTES), dtype=np.uint8), None),
     )
     # No `with` block: skip the lifespan (startup update check + warm-up).
     return TestClient(search_api.app), search_api
@@ -69,8 +69,61 @@ def test_missing_key_is_rejected(api):
 
 
 # ---------------------------------------------------------------------------
+# api_handler
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_embeddings_parse_float_vector(monkeypatch):
+    import api_handler
+
+    payload = {"embedding": [1] * EMB_BYTES, "embedding_float": [0.05] * (EMB_BYTES * 8)}
+    monkeypatch.setattr(api_handler.requests, "post", lambda *a, **k: _FakeResponse(payload))
+    packed, float_vec = api_handler.get_query_embeddings("q")
+    assert packed.shape == (1, EMB_BYTES) and packed.dtype == np.uint8
+    assert float_vec.shape == (EMB_BYTES * 8,) and float_vec.dtype == np.float32
+
+
+def test_embeddings_without_float_vector_fall_back(monkeypatch):
+    import api_handler
+
+    payload = {"embedding": [1] * EMB_BYTES}   # older model server
+    monkeypatch.setattr(api_handler.requests, "post", lambda *a, **k: _FakeResponse(payload))
+    packed, float_vec = api_handler.get_query_embeddings("q")
+    assert float_vec is None
+    assert api_handler.get_query_embedding_packed("q").shape == (1, EMB_BYTES)
+
+
+# ---------------------------------------------------------------------------
 # model_api
 # ---------------------------------------------------------------------------
+
+def test_model_encode_returns_packed_and_float():
+    import model_api
+
+    class FakeModel:
+        def encode(self, texts, **kwargs):
+            v = np.linspace(-1, 1, EMB_BYTES * 8, dtype=np.float32)
+            return (v / np.linalg.norm(v))[None, :]
+
+    model_api.model_context["model"] = FakeModel()
+    try:
+        body = TestClient(model_api.app).post("/encode", json={"text": "query"}).json()
+    finally:
+        model_api.model_context.clear()
+    assert len(body["embedding"]) == EMB_BYTES
+    assert len(body["embedding_float"]) == EMB_BYTES * 8
+    bits = np.unpackbits(np.array(body["embedding"], dtype=np.uint8))
+    assert np.array_equal(bits, (np.array(body["embedding_float"]) > 0).astype(np.uint8))
+
 
 def test_model_health_is_503_until_model_loaded():
     import model_api
