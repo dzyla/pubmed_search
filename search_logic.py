@@ -11,7 +11,7 @@ import pandas as pd
 from pathlib import Path
 import concurrent.futures
 from collections import OrderedDict
-from aux_index import AuxIndex
+from aux_index import AuxIndex, PmcIndex
 from data_handler import fetch_specific_rows, build_sorted_intervals_from_metadata, clear_parquet_cache
 from identifiers import identifier_tokens, token_hash
 from utils import log_time
@@ -46,6 +46,19 @@ _RESULT_CACHE: "OrderedDict" = OrderedDict()
 _RESULT_CACHE_MAX = 128
 _RESULT_CACHE_LOCK = threading.Lock()
 _INDEX_GENERATION = 0
+
+# PMID -> PMCID lookup for "Free full text" links (one per aux-index root)
+_PMC_INDEXES: dict = {}
+
+
+def _pmc_index(configs):
+    root = next((c.get("aux_index_root") for c in configs if c and c.get("aux_index_root")), None)
+    if not root:
+        return None
+    if root not in _PMC_INDEXES:
+        _PMC_INDEXES[root] = PmcIndex(root)
+        _PMC_INDEXES[root].refresh()
+    return _PMC_INDEXES[root]
 
 # How often trigger_database_updates() runs a full FS scan.
 # Set via MSS_UPDATE_INTERVAL_S env var; 0 disables rate-limiting.
@@ -1349,6 +1362,10 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         )
         result_df.loc[med_mask, "source"] = "MedRxiv"
 
+    pmc = _pmc_index(configs)
+    if pmc is not None and "pmid" in result_df.columns:
+        result_df["pmcid"] = pmc.lookup(result_df["pmid"].tolist())
+
     if "doi" in result_df.columns:
         preprint_mask = (result_df["source"] == "PubMed") & result_df["doi"].astype(str).str.contains(
             r"10\.1101/|10\.64898/", na=False
@@ -1475,6 +1492,11 @@ def trigger_database_updates(configs, *, force: bool = False) -> bool:
                     LOGGER.info("Update detected for a source.")
             except Exception as e:
                 LOGGER.error(f"Error during update check: {e}")
+
+    for pmc in _PMC_INDEXES.values():
+        if pmc.refresh():
+            _invalidate_result_cache()
+            updates_found = True
 
     if updates_found:
         clear_parquet_cache()

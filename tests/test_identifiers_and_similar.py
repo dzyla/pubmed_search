@@ -88,3 +88,17 @@ def test_similar_search_excludes_examples(pubmed_like):
         search_logic.similar_search(["PubMed:999999"], [config], [config], 5)
     with pytest.raises(search_logic.UnknownReference):
         search_logic.similar_search(["Scopus:1"], [config], [config], 5)
+
+
+def test_pmc_lookup(tmp_path):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "update_database"))
+    import pmc_links_update
+    from aux_index import PmcIndex
+
+    csv = tmp_path / "PMC-ids.csv"
+    pd.DataFrame({"PMCID": ["PMC10", "PMC20", "PMC30", "PMC40"], "PMID": ["300", "100", "", "200"],
+                  "Release Date": ["live", "live", "live", "2999-01-01"]}).to_csv(csv, index=False)
+    meta = pmc_links_update.build(str(csv), str(tmp_path / "aux" / "PMC"))
+    assert meta["articles"] == 2                      # no PMID / still embargoed are left out
+    idx = PmcIndex(str(tmp_path / "aux"))
+    assert idx.refresh() and idx.lookup(["100", 300, "200", None, "x"]) == ["PMC20", "PMC10", None, None, None]
