@@ -215,3 +215,19 @@ def test_index_change_invalidates_cache(corpus):
     search_logic._clear_index_cache_for_dir(config["chunk_dir"])
 
     assert not search_logic._RESULT_CACHE
+
+
+def test_rare_date_range_uses_few_rounds(corpus, monkeypatch):
+    """Date screening reads only the date column and grows its probe size."""
+    config, _ = corpus
+    calls = []
+    orig = search_logic.fetch_specific_rows
+    monkeypatch.setattr(search_logic, "fetch_specific_rows",
+                        lambda *a, **k: calls.append(k.get("columns")) or orig(*a, **k))
+    query = np.zeros((1, EMB_BYTES), dtype=np.uint8)
+
+    df = search_logic._run_search(query, [config, {}, {}, {}], 10, "2015-01-01", None, True, None)
+
+    assert len(df) == 10 and (pd.to_datetime(df["date"]) >= "2015-01-01").all()
+    date_only = [c for c in calls if c == search_logic._DATE_COLUMNS]
+    assert date_only and len(calls) <= 6

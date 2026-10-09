@@ -93,6 +93,7 @@ def fetch_specific_rows(
     data_folder: str,
     combined_data_file: str = None,
     intervals: list = None,   # pre-built by ChunkedSearcher — avoids rebuild per query
+    columns: list = None,     # restrict to these columns (e.g. date only); default: _WISHLIST
 ) -> pd.DataFrame:
     """
     Fetches metadata rows from parquet files for the given FAISS hits.
@@ -130,6 +131,8 @@ def fetch_specific_rows(
         local_indices = [r[0] for r in requests]
         try:
             dataset, columns_to_fetch = _get_or_open_dataset(parquet_path)
+            if columns is not None:
+                columns_to_fetch = [c for c in columns if c in dataset.schema.names]
             table = dataset.scanner(columns=columns_to_fetch).take(local_indices)
 
             # to_pydict() is faster than to_pandas() for 1-10 row tables:
@@ -140,6 +143,7 @@ def fetch_specific_rows(
                 if i < len(table):
                     row = {k: raw[k][i] for k in raw}
                     row["score"] = hit_info["score"]
+                    row["corpus_id"] = hit_info["corpus_id"]
                     results.append(row)
             return results
 
