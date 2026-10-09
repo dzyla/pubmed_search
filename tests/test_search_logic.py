@@ -282,3 +282,15 @@ def test_aligned_combined_file_is_searched(tmp_path):
     query = np.zeros((1, EMB_BYTES), dtype=np.uint8)
     df = search_logic._run_search(query, [{}, config, {}, {}], 10, None, None, True, None)
     assert len(df) == 10 and (df["source"] == "BioRxiv").all()
+
+
+def test_source_returns_once_files_match_again(tmp_path):
+    config = _combined_corpus(tmp_path, n_emb=120, n_rows=100)
+    searcher = search_logic.get_or_create_searcher(config)
+    assert searcher.data_problem
+    # the missing parquet rows arrive (e.g. second half of a sync)
+    pd.DataFrame({"title": [f"P{i}" for i in range(120)], "abstract": ["x" * 100] * 120,
+                  "doi": [f"10.1101/{i}" for i in range(120)], "date": ["2020-01-01"] * 120,
+                  "server": ["biorxiv"] * 120}).to_parquet(config["combined_data_file"])
+    assert searcher.check_for_updates() is True
+    assert searcher.data_problem is None

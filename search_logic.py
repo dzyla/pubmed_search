@@ -331,6 +331,11 @@ class ChunkedSearcher:
         self.was_updated = False
         externally_changed = self._reload_metadata_if_externally_changed()
         self._ensure_chunks_exist()
+        if self.data_problem and not (self.was_updated or externally_changed):
+            # A sync may land the .npy before its parquet: re-check each pass
+            # so the source comes back as soon as the files match again.
+            self.data_problem = self._check_alignment()
+            return self.data_problem is None
         if self.was_updated or externally_changed:
             if self.was_updated:
                 self.metadata = self._load_metadata()
