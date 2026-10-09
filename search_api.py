@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config_loader import read_source_configs
 from search_logic import combined_search_orchestrator, trigger_database_updates, warm_up_indexes
 from utils import get_clean_doi
-from api_handler import get_query_embedding_packed, EmbeddingError
+from api_handler import get_query_embeddings, EmbeddingError
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -291,7 +291,7 @@ async def search(req: SearchRequest):
 
     # --- Encode query via shared api_handler (blocking HTTP call → worker thread) ---
     try:
-        query_packed = await asyncio.to_thread(get_query_embedding_packed, req.query, MODEL_URL)
+        query_packed, query_float = await asyncio.to_thread(get_query_embeddings, req.query, MODEL_URL)
     except EmbeddingError as exc:
         LOGGER.error(f"Embedding failed: {exc}")
         raise HTTPException(status_code=503, detail="Embedding service unavailable. Please try again later.")
@@ -306,6 +306,7 @@ async def search(req: SearchRequest):
             req.start_date.isoformat() if req.start_date else None,
             req.end_date.isoformat() if req.end_date else None,
             req.high_quality_only,
+            query_float,
         )
     except Exception:
         LOGGER.exception("Search failed")

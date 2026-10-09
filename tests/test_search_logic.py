@@ -35,6 +35,34 @@ def test_returns_true_top_k(corpus, seed):
     assert got == pytest.approx(_true_top_scores(all_emb, query, 10))
 
 
+@pytest.mark.parametrize("seed", range(3))
+def test_float_rescoring_returns_true_float_top_k(corpus, seed):
+    config, all_emb = corpus
+    q_float = np.random.default_rng(200 + seed).standard_normal(EMB_BYTES * 8).astype(np.float32)
+    q_float /= np.linalg.norm(q_float)
+    query = np.packbits(q_float > 0)[None, :]
+
+    df = search_logic.combined_search_orchestrator(
+        query, [config, {}, {}, {}], top_k=10, query_float=q_float
+    )
+
+    expected = sorted(search_logic.rescore_with_float_query(q_float, all_emb).tolist(), reverse=True)[:10]
+    assert sorted(df["score"].tolist(), reverse=True) == pytest.approx(expected, abs=1e-6)
+    # and it is a different ranking from plain Hamming for at least part of the list
+    hamming_top = _true_top_scores(all_emb, query, 10)
+    assert hamming_top != pytest.approx(expected)
+
+
+def test_rescore_matches_plain_float_dot_product():
+    rng = np.random.default_rng(7)
+    codes = rng.integers(0, 256, size=(500, EMB_BYTES), dtype=np.uint8)
+    q = rng.standard_normal(EMB_BYTES * 8).astype(np.float32)
+    q /= np.linalg.norm(q)
+    signs = np.unpackbits(codes, axis=1).astype(np.float64) * 2 - 1
+    expected = (1 + signs @ q / np.sqrt(EMB_BYTES * 8)) / 2
+    assert search_logic.rescore_with_float_query(q, codes) == pytest.approx(expected, abs=1e-5)
+
+
 def test_start_date_alone_is_applied(corpus):
     config, _ = corpus
     query = np.zeros((1, EMB_BYTES), dtype=np.uint8)
