@@ -180,6 +180,39 @@ def check_nas_backup():
         return [f"NAS backup marker unreadable ({exc.__class__.__name__}) — has the backup ever succeeded?"]
 
 
+def weekly_usage() -> str:
+    """Plain-text usage summary for the last 7 days (counts and timings only)."""
+    try:
+        out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", SERVER,
+                              "cd /root/pubmed_search && /root/space_env/bin/python tools/usage_report.py --days 7"],
+                             capture_output=True, text=True, timeout=180).stdout
+        u = json.loads(out.strip().splitlines()[-1])
+    except Exception as exc:
+        return f"Usage report unavailable ({exc.__class__.__name__})."
+    days = u.get("per_day", {})
+    searches = sum(d["searches"] for d in days.values())
+    similar = sum(d["similar"] for d in days.values())
+    lat = u.get("latency", {})
+    lines = [f"Last 7 days: {searches:,} searches and {similar:,} 'similar papers' requests"
+             + (f"; median {lat['p50_s']} s, 95% under {lat['p95_s']} s, slowest {lat['max_s']} s." if lat.get("p50_s") else ".")]
+    busiest = max(days.items(), key=lambda kv: kv[1]["searches"] + kv[1]["similar"], default=None)
+    if busiest:
+        lines.append(f"Busiest day: {busiest[0]} ({busiest[1]['searches'] + busiest[1]['similar']:,}).")
+    tiers = u.get("api_by_tier", {})
+    if "error" in tiers:
+        lines.append(f"API usage unavailable: {tiers['error']}")
+    elif tiers:
+        lines.append("API and MCP: " + "; ".join(
+            f"{t} {v['requests']:,} request{'s' if v['requests'] != 1 else ''} from {v['callers']:,} "
+            f"{'IP' if t == 'anonymous' else 'key'}{'s' if v['callers'] != 1 else ''}"
+            for t, v in sorted(tiers.items())) + ".")
+    else:
+        lines.append("No API or MCP use.")
+    if u.get("new_keys"):
+        lines.append(f"New API keys: {u['new_keys']}.")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 
 def send_outlook(to: str, subject: str, body: str):
@@ -249,15 +282,18 @@ def main():
         json.dump(state, f)
 
     problems = [(s, p) for s, ps in sections.items() for p in ps]
+    monday = date.today().weekday() == 0
     if problems:
         title = f"Manuscript Search: {len(problems)} problem{'s' if len(problems) > 1 else ''}"
         body = "\n".join(f"• [{s}] {p}" for s, p in problems)
         priority = "high"
-    elif date.today().weekday() == 0:
+    elif monday:
         title, body, priority = "Manuscript Search: all good", "Weekly check-in: every daily check passed.", "low"
     else:
         print("all checks passed")
         return
+    if monday:
+        body += "\n\nUsage\n" + weekly_usage()
     print(title + "\n" + body)
     if not args.dry_run:
         send(env, title, body, priority)
