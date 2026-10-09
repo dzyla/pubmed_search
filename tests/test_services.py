@@ -39,6 +39,8 @@ def test_search_returns_results(api):
     papers = r.json()["results"]
     assert len(papers) == 5
     assert all(p["year"] == 2015 for p in papers)
+    assert all(p["url"].startswith("https://doi.org/10.1234/") for p in papers)
+    assert all(p["labels"] == [] and p["retracted"] is False for p in papers)
 
 
 @pytest.mark.parametrize("body", [
