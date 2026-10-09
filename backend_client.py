@@ -59,6 +59,36 @@ def search(query: str, top_k: int = 10, start_date=None, end_date=None,
     return df, payload
 
 
+def _post(path: str, body: dict):
+    try:
+        r = requests.post(f"{BACKEND_URL}{path}", json=body, timeout=SEARCH_TIMEOUT_S,
+                          headers={"X-API-Key": INTERNAL_KEY})
+    except requests.exceptions.ConnectionError:
+        raise BackendError("The search service is not reachable. It may be restarting; "
+                           "try again in a minute.") from None
+    except requests.exceptions.Timeout:
+        raise BackendError("The search took too long. Try again or ask for fewer results.") from None
+    if r.status_code == 503 and r.headers.get("Retry-After"):
+        raise BackendBusy(_error_detail(r))
+    if r.status_code != 200:
+        raise BackendError(_error_detail(r))
+    payload = r.json()
+    return pd.DataFrame(payload.pop("results", [])), payload
+
+
+def similar(refs, top_k: int = 10, start_date=None, end_date=None,
+            high_quality_only: bool = True, sources=None):
+    """Papers similar to example papers (their 'ref's). Returns (DataFrame, metadata incl. seeds)."""
+    body = {"refs": list(refs), "top_k": top_k, "high_quality_only": high_quality_only}
+    if start_date:
+        body["start_date"] = str(start_date)
+    if end_date:
+        body["end_date"] = str(end_date)
+    if sources:
+        body["sources"] = list(sources)
+    return _post("/v1/similar", body)
+
+
 def stats() -> dict:
     """Corpus sizes and update dates; {} if the backend is unreachable."""
     try:

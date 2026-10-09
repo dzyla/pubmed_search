@@ -151,6 +151,8 @@ def fetch_specific_rows(
                     row = {k: raw[k][i] for k in raw}
                     row["score"] = hit_info["score"]
                     row["corpus_id"] = hit_info["corpus_id"]
+                    if hit_info.get("matched_terms"):
+                        row["matched_terms"] = hit_info["matched_terms"]
                     results.append(row)
             return results
 

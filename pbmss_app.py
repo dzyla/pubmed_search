@@ -21,6 +21,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+import re
+
 import backend_client
 import gemini_handler
 import ui_components
@@ -82,12 +84,32 @@ def render_chat_interface(results, ai_api_key):
 # Search form
 # ---------------------------------------------------------------------------
 
-# A shared link (?q=…) pre-fills the query and runs the search once.
+# A shared link (?q=… or ?similar=Source:id,…) re-runs that search once.
 _url_query = st.query_params.get("q", "")
+_url_similar = st.query_params.get("similar", "")
 if "query_text" not in st.session_state:
     st.session_state["query_text"] = _url_query
-auto_search = bool(_url_query) and not st.session_state.get("auto_searched")
+first_load = not st.session_state.get("auto_searched")
+auto_search = bool(_url_query) and first_load and not _url_similar
+if _url_similar and first_load:
+    st.session_state["similar_request"] = [r for r in _url_similar.split(",") if r]
 st.session_state["auto_searched"] = True
+
+
+def _clear_selection():
+    for key in [k for k in st.session_state if k.startswith("sel::")]:
+        del st.session_state[key]
+
+
+def _store_results(results, meta, t0):
+    results["rank"] = range(1, len(results) + 1)
+    st.session_state["final_results"] = results
+    st.session_state["search_meta"] = {**meta, "elapsed": (datetime.now() - t0).total_seconds()}
+    for key in ("ai_summary", "citations", "doi_list"):
+        st.session_state[key] = None
+    st.session_state["chat_history"] = []
+    st.session_state["ai_questions"] = []
+    _clear_selection()
 
 with st.form("search_form", border=False):
     query = st.text_area(
@@ -148,10 +170,8 @@ else:
 if submitted and query and not sources:
     st.warning("Choose at least one database to search.")
 elif submitted and query:
-    for key in ("ai_summary", "citations", "doi_list"):
-        st.session_state[key] = None
-    st.session_state["chat_history"] = []
-    st.session_state["ai_questions"] = []
+    st.session_state["view"] = "search"
+    st.query_params.pop("similar", None)
 
     # Shareable URL for this search (long pasted abstracts are left out of the URL)
     if len(query) <= 2000:
@@ -177,13 +197,33 @@ elif submitted and query:
             results, meta = None, {}
 
     if results is not None:
-        results["rank"] = range(1, len(results) + 1)
-        st.session_state["final_results"] = results
-        st.session_state["search_meta"] = {**meta, "elapsed": (datetime.now() - t0).total_seconds()}
+        _store_results(results, meta, t0)
         st.session_state["search_query"] = query
         if results.empty:
             st.info("Nothing matched. Try describing the topic in a full sentence, "
                     "widen the date range, or include more databases.")
+
+# --- "More like this": papers similar to one or more example papers ---
+similar_refs = st.session_state.pop("similar_request", None)
+if similar_refs:
+    if st.session_state.get("view") != "similar":
+        st.session_state["search_backup"] = {
+            k: st.session_state.get(k) for k in ("final_results", "search_meta", "search_query")}
+    with st.spinner("Finding similar papers…"):
+        t0 = datetime.now()
+        try:
+            results, meta = backend_client.similar(
+                similar_refs, top_k=int(num_to_show), start_date=start_date_str, end_date=end_date_str,
+                high_quality_only=use_high_quality,
+                sources=None if set(sources) == set(SOURCE_OPTIONS) else sources,
+            )
+            _store_results(results, meta, t0)
+            st.session_state["view"] = "similar"
+            st.query_params["similar"] = ",".join(similar_refs)
+        except backend_client.BackendBusy as exc:
+            st.warning(str(exc))
+        except backend_client.BackendError as exc:
+            st.error(f"Could not find similar papers: {exc}")
 
 final_results = st.session_state.get("final_results", pd.DataFrame())
 
@@ -204,7 +244,12 @@ if not final_results.empty:
     results["citations"] = st.session_state["citations"] if citations_ready else [None] * len(results)
 
     head_l, head_r = st.columns([1.4, 1], vertical_alignment="bottom")
-    head_l.markdown(f"### {len(results)} results")
+    if st.session_state.get("view") == "similar":
+        seeds = meta.get("seeds", [])
+        head_l.markdown(f"### {len(results)} papers similar to "
+                        f"{'this paper' if len(seeds) == 1 else f'these {len(seeds)} papers'}")
+    else:
+        head_l.markdown(f"### {len(results)} results")
     sort_option = head_r.segmented_control(
         "Sort by", ["Relevance", "Newest", "Most cited"], default="Relevance",
         key="sort_option", label_visibility="collapsed",
@@ -216,8 +261,34 @@ if not final_results.empty:
         results = results.sort_values("citations", ascending=False)
     results = results.reset_index(drop=True)
 
+    if st.session_state.get("view") == "similar":
+        ui_components.render_seeds(meta.get("seeds", []))
+        if st.session_state.get("search_backup", {}).get("final_results") is not None:
+            if st.button("Back to your search results", icon=":material/arrow_back:", type="tertiary"):
+                for k, v in st.session_state.pop("search_backup").items():
+                    st.session_state[k] = v
+                for key in ("ai_summary", "citations", "doi_list"):
+                    st.session_state[key] = None
+                st.session_state["view"] = "search"
+                st.query_params.pop("similar", None)
+                _clear_selection()
+                st.rerun()
+
     if meta.get("query_bits"):
         ui_components.render_fingerprint(meta["query_bits"])
+
+    # Several papers selected -> one "more like these" search
+    selected = [k[5:] for k, v in st.session_state.items() if k.startswith("sel::") and v]
+    if selected:
+        with st.container(border=True):
+            b1, b2, b3 = st.columns([1.2, 2.2, 1], vertical_alignment="center")
+            b1.markdown(f"**{len(selected)} selected**")
+            if b2.button("Find papers like the selected", type="primary", icon=":material/hub:"):
+                st.session_state["similar_request"] = selected
+                st.rerun()
+            if b3.button("Clear selection", type="tertiary"):
+                _clear_selection()
+                st.rerun()
 
     if use_ai and ai_api_key and st.session_state.get("ai_summary"):
         with st.container(border=True):
@@ -229,8 +300,20 @@ if not final_results.empty:
 
     with tab_results:
         top_score = float(final_results["score"].max())
+        # matched identifiers are reported normalized; show them as the user typed them
+        term_display = {w.replace("-", "").lower(): w for w in
+                        re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9]", st.session_state.get("search_query") or "")}
         for _, row in results.iterrows():
-            ui_components.render_entry(row, int(row["rank"]), row["citations"], top_score)
+            ui_components.render_entry(row, int(row["rank"]), row["citations"], top_score, term_display)
+            ref = row.get("ref")
+            if isinstance(ref, str) and ref:
+                with st.container(key=f"actions_{row['rank']}"):
+                    a1, a2, _ = st.columns([1, 1.7, 3], vertical_alignment="center")
+                    a1.checkbox("Select", key=f"sel::{ref}",
+                                help="Select several papers, then find papers like all of them.")
+                    if a2.button("Similar papers", key=f"sim::{ref}", icon=":material/hub:", type="tertiary"):
+                        st.session_state["similar_request"] = [ref]
+                        st.rerun()
         st.markdown("#### Relevance and publication date")
         st.plotly_chart(ui_components.plot_score_vs_year(results), width="stretch",
                         config={"displayModeBar": False})

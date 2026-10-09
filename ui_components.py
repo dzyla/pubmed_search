@@ -72,6 +72,13 @@ _CSS = f"""
                align-items: center; font-size: 0.8rem; color: {MUTED}; }}
   .mss-src {{ font-weight: 600; }}
   .mss-tag {{ border: 1px solid {RULE}; border-radius: 0.3rem; padding: 0.05rem 0.4rem; color: {INK}; }}
+  .mss-exact {{ border-color: {EOSIN}; color: {EOSIN}; font-weight: 600; }}
+
+  /* Per-result actions (select / similar), aligned with the entry text */
+  [class*="st-key-actions_"] {{ margin-left: 2.6rem; margin-top: -0.2rem; }}
+  [class*="st-key-actions_"] label p, [class*="st-key-actions_"] button p {{ font-size: 0.84rem; }}
+  .mss-seeds {{ margin: 0 0 0.8rem 0; padding-left: 1.1rem; color: {MUTED}; font-size: 0.92rem; }}
+  .mss-seeds a {{ font-family: "Newsreader", serif; font-size: 1.02rem; color: {INK} !important; }}
   .mss-retracted {{ display: inline-block; background: #B42318; color: #fff; border-radius: 0.3rem;
                     padding: 0.05rem 0.45rem; font-family: "Instrument Sans", sans-serif;
                     font-size: 0.75rem; font-weight: 600; margin-right: 0.4rem; vertical-align: 0.15em; }}
@@ -168,6 +175,18 @@ def fingerprint_svg(bits_hex: str, cell: int = 6, gap: int = 1) -> str:
             f'aria-label="Binary code of your query, {len(bits)} bits">{"".join(rects)}</svg>')
 
 
+def render_seeds(seeds: list):
+    """List of the example papers a similarity search was based on."""
+    items = []
+    for sd in seeds:
+        url = _safe_url(sd.get("url"))
+        title = _e(sd.get("title")) or "Untitled"
+        src = _e(SOURCE_NAMES.get(sd.get("source"), sd.get("source", "")))
+        link = f'<a href="{url}" target="_blank" rel="noopener">{title}</a>' if url else title
+        items.append(f"<li>{link} <span>({src}{', ' + _e(sd.get('date')) if sd.get('date') else ''})</span></li>")
+    st.markdown(f'<ul class="mss-seeds">{"".join(items)}</ul>', unsafe_allow_html=True)
+
+
 def render_fingerprint(bits_hex: str):
     svg = fingerprint_svg(bits_hex)
     if svg:
@@ -210,7 +229,7 @@ def _links(row) -> list:
     return paper_links.build_links(row)
 
 
-def render_entry(row, rank: int, citations, top_score: float):
+def render_entry(row, rank: int, citations, top_score: float, term_display: dict = None):
     links = _links(row)
     url = _safe_url(links[0][1]) if links else ""
     title = _e(row.get("title")) or "Untitled"
@@ -242,6 +261,11 @@ def render_entry(row, rank: int, citations, top_score: float):
     pct = max(4, min(100, round(100 * (score - 0.5) / max(top_score - 0.5, 1e-6))))
     facts = [f'<span class="mss-src" style="color:{SOURCE_COLORS.get(source, INK)}">'
              f'{_e(SOURCE_NAMES.get(source, source))}</span>']
+    matched = row.get("matched_terms")
+    if isinstance(matched, (list, tuple, np.ndarray)) and len(matched):
+        shown = ", ".join((term_display or {}).get(t, t) for t in matched)
+        facts.append(f'<span class="mss-tag mss-exact" title="Contains these terms from your query">'
+                     f'matches {_e(shown)}</span>')
     facts += [f'<span class="mss-tag">{_e(lab)}</span>' for lab in labels]
     if source in _NO_CITATIONS:
         pass
@@ -423,7 +447,8 @@ def render_footer():
         <a href="https://zylalab.org" target="_blank" rel="noopener">Zyla Lab (zylalab.org)</a>.
         Not affiliated with PubMed, bioRxiv, medRxiv, arXiv or ClinicalTrials.gov.
         Search from your own code or AI agent with the
-        <a href="/docs" target="_blank" rel="noopener">REST API and MCP endpoint</a>.
+        <a href="/docs" target="_blank" rel="noopener">REST API and MCP endpoint</a>
+        (<a href="/signup" target="_blank" rel="noopener">get a free API key</a>).
         <a href="https://www.buymeacoffee.com/dzyla" target="_blank" rel="noopener">Support the server costs</a>.
         </footer>""",
         unsafe_allow_html=True,

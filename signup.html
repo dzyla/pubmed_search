@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get an API key · Manuscript Search</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500&display=swap" rel="stylesheet">
+{turnstile_script}
+<style>
+  :root { --glass:#F4F3F8; --ink:#2A2250; --eosin:#C8336B; --muted:#6D6884; --rule:#DDD9E8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--glass); color:var(--ink); font:16px/1.6 "Instrument Sans", system-ui, sans-serif; }
+  main { max-width: 34rem; margin: 0 auto; padding: 3.5rem 1.25rem 3rem; }
+  h1 { font: 500 2.4rem/1.1 "Newsreader", Georgia, serif; margin: 0 0 1rem; letter-spacing: -0.01em; }
+  p { margin: 0 0 1rem; }
+  .muted { color: var(--muted); font-size: 0.92rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0.4rem 0 1.6rem; font-size: 0.95rem; }
+  td { padding: 0.45rem 0; border-bottom: 1px solid var(--rule); }
+  td:last-child { text-align: right; font-weight: 600; }
+  label { display:block; font-weight: 600; margin: 0 0 0.35rem; }
+  input[type=email] { width:100%; padding: 0.6rem 0.7rem; border:1px solid var(--rule); border-radius: 0.3rem;
+                      font: inherit; background: #fff; color: var(--ink); }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--eosin); outline-offset: 2px; }
+  button { margin-top: 1rem; background: var(--eosin); color: #fff; border: 0; border-radius: 0.3rem;
+           padding: 0.6rem 1.1rem; font: 600 1rem "Instrument Sans", sans-serif; cursor: pointer; }
+  button[disabled] { opacity: 0.6; cursor: default; }
+  .cf-turnstile { margin-top: 1rem; }
+  #result { margin-top: 1.2rem; font-weight: 500; }
+  code { background: #fff; border: 1px solid var(--rule); border-radius: 0.25rem; padding: 0.05rem 0.3rem; font-size: 0.88rem; }
+  a { color: #4A3A8C; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Get an API key</h1>
+  <p>Search Manuscript Search from your own code or AI agent through the
+     <a href="/docs">REST API</a> or the MCP endpoint at <code>/mcp</code>.</p>
+  <table>
+    <tr><td>Without a key</td><td>{anon} searches per day</td></tr>
+    <tr><td>With a free key</td><td>{free} searches per day</td></tr>
+  </table>
+  {form}
+  <p class="muted">We store your email address only to send the key and to stop duplicate sign-ups.
+     One active key per address; requesting again replaces the old key.</p>
+</main>
+{form_script}
+</body>
+</html>

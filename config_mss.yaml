@@ -1,3 +1,6 @@
+# Identifier index + PubMed superseded rows (built weekly on the desktop, synced nightly)
+aux_index_root: "/root/pubmed_semantic_search/aux_index"
+
 pubmed_config:
   embeddings_directory: "/root/pubmed_semantic_search/pubmed26_update_embed/"
   xml_directory: "/root/pubmed_semantic_search/pubmed26_update_xmls/"
