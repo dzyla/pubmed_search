@@ -55,8 +55,11 @@ Use the `pubmed_search` conda env locally (same streamlit/pandas/faiss as the se
 
 ## Data pipeline
 
-`update_database/` scripts run nightly on the lab desktop GPU (cron there, paths
-hardcoded to `/mnt/h/...`), then rsync `.npy` + `.parquet` to the server.
+`update_database/` scripts run on the lab desktop GPU from this repo's checkout
+(cron there; paths hardcoded to `/mnt/h/...`): bioRxiv/medRxiv 02:00, PubMed
+02:10/02:15 nightly, arXiv weekly (Sun 01:30, `arxiv_oai_update.py` via OAI-PMH);
+02:30 rsync of `snowflake/` (.npy + .parquet) to the server, where the backend
+picks the files up within the hour. Editing these scripts changes production data.
 
 ## Deploy
 
