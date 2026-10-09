@@ -22,7 +22,10 @@ Environment (all optional):
     MSS_QUEUE_TIMEOUT_S          default 20
     MSS_UPDATE_INTERVAL_S        default 3600
     MSS_CORS_ORIGINS             comma-separated, default *
-    MSS_ADMIN_SECRET             enables POST /keys/generate
+    MSS_ACCESS_DB                key/quota database (default data/access.sqlite3)
+    MSS_TURNSTILE_SITEKEY / MSS_TURNSTILE_SECRET     Cloudflare Turnstile (signup bot check)
+    MSS_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM  sender for signup emails
+Keys: python access.py create|revoke|list|usage
 """
 
 import asyncio
@@ -36,7 +39,10 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from dataclasses import dataclass
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
@@ -44,12 +50,17 @@ from pydantic import BaseModel, Field
 # Ensure local modules are importable when run from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import numpy as np
+
+import access
 import embedder
 import paper_links
 from config_loader import read_source_configs
 from mcp_server import SOURCES, SearchFailed, build_mcp
+import pandas as pd
 from search_logic import (
-    _SEARCHER_CACHE, combined_search_orchestrator, trigger_database_updates, warm_up_indexes,
+    _SEARCHER_CACHE, UnknownReference, combined_search_orchestrator, similar_search,
+    trigger_database_updates, warm_up_indexes,
 )
 from utils import get_clean_doi
 
@@ -84,30 +95,50 @@ INTERNAL_MAX_TOP_K, INTERNAL_MAX_QUERY_CHARS = 50, 8192
 # ---------------------------------------------------------------------------
 # API keys
 # ---------------------------------------------------------------------------
-def _load_api_keys(path: str) -> set:
-    keys: set = set()
-    try:
-        with open(path) as f:
-            for line in f:
-                key = line.strip()
-                if key and not key.startswith("#"):
-                    keys.add(key)
-        LOGGER.info(f"Loaded {len(keys)} API key(s) from {path}")
-    except FileNotFoundError:
-        LOGGER.warning(f"API keys file not found at {path}; only the internal key is accepted.")
-    return keys
+@dataclass
+class Caller:
+    tier: str                 # internal | partner | free | anonymous
+    subject: str              # quota bucket: key hash prefix or client IP
+    limit: Optional[int]      # searches per UTC day (None = unlimited)
 
 
-VALID_KEYS: set = _load_api_keys(API_KEYS_FILE)
+def _client_ip(host: Optional[str], headers: dict) -> str:
+    """nginx passes the real client address; trust it only from a local proxy."""
+    if host in ("127.0.0.1", "::1") and headers.get("x-real-ip"):
+        return headers["x-real-ip"]
+    return host or "unknown"
 
 
-def _key_tier(key: Optional[str]) -> Optional[str]:
-    """'internal', 'public', or None for an unknown key."""
-    if not key:
+def resolve_caller(key: Optional[str], ip: str) -> Optional[Caller]:
+    """Caller for a key (None if the key is invalid) or the anonymous tier."""
+    if key:
+        if INTERNAL_KEY and secrets.compare_digest(key, INTERNAL_KEY):
+            return Caller("internal", "internal", None)
+        found = access.lookup(key)
+        return Caller(*found) if found else None
+    return Caller("anonymous", f"ip:{ip}", access.LIMITS["anonymous"])
+
+
+def _seconds_to_utc_midnight() -> int:
+    now = datetime.now(timezone.utc)
+    return int(86400 - (now.hour * 3600 + now.minute * 60 + now.second))
+
+
+class QuotaExceeded(Exception):
+    def __init__(self, caller: Caller):
+        hint = ("Get a free API key for a higher limit at /signup."
+                if caller.tier == "anonymous" else "The limit resets at 00:00 UTC.")
+        super().__init__(f"Daily limit of {caller.limit} searches reached. {hint}")
+
+
+def consume_quota(caller: Caller) -> Optional[int]:
+    """Counts one search; returns remaining searches (None = unlimited)."""
+    if caller.limit is None:
         return None
-    if INTERNAL_KEY and secrets.compare_digest(key, INTERNAL_KEY):
-        return "internal"
-    return "public" if key in VALID_KEYS else None
+    allowed, remaining = access.consume(caller.subject, caller.limit)
+    if not allowed:
+        raise QuotaExceeded(caller)
+    return remaining
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +195,17 @@ class SearchRequest(BaseModel):
     }}}
 
 
+class SimilarRequest(BaseModel):
+    refs: List[str] = Field(..., min_length=1, max_length=20, description=(
+        "1-20 example papers, as the 'ref' values of search results (e.g. 'PubMed:123456'). "
+        "Several examples are combined into one 'more like these' query."))
+    top_k: int = Field(default=10, ge=1, le=INTERNAL_MAX_TOP_K, description=f"Number of results, 1-{PUBLIC_MAX_TOP_K}.")
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    high_quality_only: bool = True
+    sources: Optional[List[SourceName]] = None
+
+
 class Link(BaseModel):
     label: str
     url: str
@@ -187,10 +229,16 @@ class Paper(BaseModel):
     retracted: bool = Field(default=False, description="True if the paper has been retracted.")
     published_doi: Optional[str] = Field(default=None, description="For preprints: DOI of the journal version.")
     preprint_doi: Optional[str] = Field(default=None, description="For journal articles: DOI of the merged preprint.")
+    matched_terms: List[str] = Field(default_factory=list, description=(
+        "Identifiers from the query (gene symbols, variants, compound or trial ids) found in this "
+        "document, normalized to lower case without hyphens."))
+    ref: Optional[str] = Field(default=None, description=(
+        "Stable reference for /v1/similar and the find_similar MCP tool, e.g. 'PubMed:123456'."))
 
 
 class SearchResponse(BaseModel):
     query: str
+    seeds: List["Paper"] = Field(default_factory=list, description="For /v1/similar: the example papers.")
     query_bits: Optional[str] = Field(default=None, description=(
         "The query's 384-bit binary code as hex — what the index matches against."))
     total_results: int
@@ -201,6 +249,14 @@ class SearchResponse(BaseModel):
 def _optional_str(value) -> Optional[str]:
     text = str(value or "").strip()
     return None if text.lower() in ("", "none", "nan", "na") else text
+
+
+def _ref(row):
+    cid = row.get("corpus_id")
+    try:
+        return f"{row.get('source')}:{int(cid)}"
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_paper(row) -> Paper:
@@ -223,6 +279,8 @@ def _to_paper(row) -> Paper:
         retracted=paper_links.is_retracted(row),
         published_doi=_optional_str(row.get("published_doi")),
         preprint_doi=_optional_str(row.get("preprint_doi")),
+        matched_terms=list(row.get("matched_terms")) if isinstance(row.get("matched_terms"), (list, tuple, np.ndarray)) else [],
+        ref=_ref(row),
     )
 
 
@@ -236,23 +294,60 @@ class ServerBusy(SearchFailed):
     pass
 
 
+class BadReference(SearchFailed):
+    pass
+
+
+async def _acquire_slot():
+    try:
+        await asyncio.wait_for(_SEARCH_SLOTS.acquire(), timeout=QUEUE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise ServerBusy("The server is busy. Please try again in a few seconds.") from None
+
+
+async def run_similar(refs: List[str], top_k: int = 10, start_date: Optional[str] = None,
+                      end_date: Optional[str] = None, high_quality_only: bool = True,
+                      sources: Optional[List[str]] = None) -> dict:
+    """Papers similar to example papers; raises SearchFailed with a client-safe message."""
+    if CONFIGS is None:
+        raise SearchFailed("Search index configuration is unavailable.")
+    await _acquire_slot()
+    t0 = time.perf_counter()
+    try:
+        df, seeds, packed = await asyncio.to_thread(
+            similar_search, refs, CONFIGS, _configs_for(sources), top_k, start_date, end_date, high_quality_only)
+    except UnknownReference as exc:
+        raise BadReference(str(exc)) from None
+    except Exception as exc:
+        LOGGER.exception("Similar search failed")
+        raise SearchFailed("Search failed. Please try again later.") from exc
+    finally:
+        _SEARCH_SLOTS.release()
+    elapsed = round(time.perf_counter() - t0, 2)
+    seed_papers = [_to_paper(pd.Series(sd)) for sd in seeds]
+    titles = "; ".join(p.title for p in seed_papers)
+    LOGGER.info(f"Similar ({len(refs)} example(s)) → {len(df)} results in {elapsed}s")
+    return SearchResponse(
+        query=f"Similar to: {titles}"[:500], seeds=seed_papers, query_bits=packed.tobytes().hex(),
+        total_results=len(df), search_time_seconds=elapsed,
+        results=[_to_paper(row) for _, row in df.iterrows()],
+    ).model_dump()
+
+
 async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = None,
                      end_date: Optional[str] = None, high_quality_only: bool = True,
                      sources: Optional[List[str]] = None) -> dict:
     """Embeds the query and searches; raises SearchFailed with a client-safe message."""
     if CONFIGS is None:
         raise SearchFailed("Search index configuration is unavailable.")
-    try:
-        await asyncio.wait_for(_SEARCH_SLOTS.acquire(), timeout=QUEUE_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        raise ServerBusy("The server is busy. Please try again in a few seconds.") from None
+    await _acquire_slot()
 
     t0 = time.perf_counter()
     try:
         packed, query_float = await asyncio.to_thread(embedder.encode_query, query)
         results_df = await asyncio.to_thread(
             combined_search_orchestrator, packed, _configs_for(sources), top_k,
-            start_date, end_date, high_quality_only, query_float,
+            start_date, end_date, high_quality_only, query_float, query,
         )
     except embedder.EmbeddingError as exc:
         raise SearchFailed("Embedding model unavailable. Please try again later.") from exc
@@ -318,31 +413,75 @@ async def get_stats() -> dict:
 mcp = build_mcp(
     search=lambda **kw: run_search(**kw, high_quality_only=True),
     stats=get_stats,
+    similar=lambda **kw: run_similar(**kw, high_quality_only=True),
     max_top_k=PUBLIC_MAX_TOP_K,
 )
 _mcp_app = mcp.streamable_http_app()   # also creates mcp.session_manager
 
 
-class _RequireApiKey:
-    """ASGI wrapper: accepts X-API-Key or 'Authorization: Bearer <key>'."""
+_QUOTA_TOOLS = {"search_papers", "find_similar"}
+
+
+class _McpAccess:
+    """
+    ASGI wrapper for /mcp. Keys via X-API-Key or 'Authorization: Bearer <key>';
+    without a key the anonymous tier applies. Every search tool call counts
+    against the caller's daily quota; listing tools etc. is free.
+    """
 
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    async def _reply(send, status: int, detail: str, extra=()):
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"), *extra]})
+        await send({"type": "http.response.body", "body": json.dumps({"detail": detail}).encode()})
+
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-            key = headers.get("x-api-key", "")
-            auth = headers.get("authorization", "")
-            if not key and auth.lower().startswith("bearer "):
-                key = auth[7:].strip()
-            if _key_tier(key) is None:
-                body = json.dumps({"detail": "Invalid or missing API key (X-API-Key or Bearer)."}).encode()
-                await send({"type": "http.response.start", "status": 401, "headers": [
-                    (b"content-type", b"application/json"), (b"www-authenticate", b"Bearer")]})
-                await send({"type": "http.response.body", "body": body})
-                return
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        key = headers.get("x-api-key", "")
+        auth = headers.get("authorization", "")
+        if not key and auth.lower().startswith("bearer "):
+            key = auth[7:].strip()
+        caller = resolve_caller(key, _client_ip((scope.get("client") or (None,))[0], headers))
+        if caller is None:
+            await self._reply(send, 401, "Invalid API key (X-API-Key or Bearer).", [(b"www-authenticate", b"Bearer")])
+            return
+
+        # Buffer the request body to see whether it calls a search tool.
+        body, more = b"", True
+        while more:
+            message = await receive()
+            body += message.get("body", b"")
+            more = message.get("more_body", False)
+        try:
+            payload = json.loads(body) if body else None
+            messages = payload if isinstance(payload, list) else [payload]
+            calls = sum(1 for m in messages if isinstance(m, dict) and m.get("method") == "tools/call"
+                        and (m.get("params") or {}).get("name") in _QUOTA_TOOLS)
+        except ValueError:
+            calls = 0
+        try:
+            for _ in range(calls):
+                consume_quota(caller)
+        except QuotaExceeded as exc:
+            await self._reply(send, 429, str(exc), [(b"retry-after", str(_seconds_to_utc_midnight()).encode())])
+            return
+
+        sent = False
+
+        async def replay():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +505,12 @@ async def lifespan(app_: FastAPI):
     global _SEARCH_SLOTS
     _SEARCH_SLOTS = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)   # bound to the serving loop
     tasks = []
+    try:
+        imported = await asyncio.to_thread(access.import_legacy_keys, API_KEYS_FILE)
+        if imported:
+            LOGGER.info(f"Imported {imported} key(s) from {API_KEYS_FILE} as partner keys")
+    except Exception as exc:
+        LOGGER.error(f"API key import failed: {exc}")
     try:
         await asyncio.to_thread(embedder.load_model)
     except Exception as exc:
@@ -423,31 +568,29 @@ class _McpRoute:
         await self.app(scope, receive, send)
 
 
-app.add_middleware(_McpRoute, mcp_app=_RequireApiKey(_mcp_app))
+app.add_middleware(_McpRoute, mcp_app=_McpAccess(_mcp_app))
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-_admin_key_header = APIKeyHeader(name="X-Admin-Secret", auto_error=False)
-_ADMIN_SECRET: str = os.environ.get("MSS_ADMIN_SECRET", "")
 
 
-async def _require_key(api_key: Optional[str] = Security(_api_key_header)) -> str:
-    tier = _key_tier(api_key)
-    if tier is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key. Pass it as the X-API-Key header.",
-            headers={"WWW-Authenticate": "ApiKey"},
-        )
-    return tier
+async def _caller(request: Request, api_key: Optional[str] = Security(_api_key_header)) -> Caller:
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    caller = resolve_caller(api_key, _client_ip(request.client.host if request.client else None, headers))
+    if caller is None:
+        raise HTTPException(status_code=401, detail="Invalid API key. Pass it as the X-API-Key header.",
+                            headers={"WWW-Authenticate": "ApiKey"})
+    return caller
 
 
-async def _require_admin(admin_secret: Optional[str] = Security(_admin_key_header)) -> None:
-    if not _ADMIN_SECRET:
-        raise HTTPException(status_code=503, detail=(
-            "Admin endpoint disabled. Set MSS_ADMIN_SECRET environment variable to enable."))
-    if not admin_secret or not secrets.compare_digest(admin_secret, _ADMIN_SECRET):
-        raise HTTPException(status_code=403, detail=(
-            "Invalid or missing admin secret. Pass it as the X-Admin-Secret header."))
+def _charge(caller: Caller, response: Response):
+    try:
+        remaining = consume_quota(caller)
+    except QuotaExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc),
+                            headers={"Retry-After": str(_seconds_to_utc_midnight())}) from None
+    if remaining is not None:
+        response.headers["X-RateLimit-Limit"] = str(caller.limit)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +603,6 @@ async def health():
         "status": "ok" if ready else "starting",
         "configs_loaded": CONFIGS is not None,
         "model_loaded": embedder.is_loaded(),
-        "api_keys_loaded": len(VALID_KEYS),
     }
     if not ready:
         raise HTTPException(status_code=503, detail=body)
@@ -478,7 +620,7 @@ async def stats():
 @app.post("/search", response_model=SearchResponse, tags=["search"],
           summary="Semantic search for scientific abstracts")
 @app.post("/v1/search", response_model=SearchResponse, tags=["search"], include_in_schema=False)
-async def search(req: SearchRequest, tier: str = Depends(_require_key)):
+async def search(req: SearchRequest, response: Response, caller: Caller = Depends(_caller)):
     """
     Performs semantic search across PubMed, bioRxiv, medRxiv and arXiv.
 
@@ -488,9 +630,10 @@ async def search(req: SearchRequest, tier: str = Depends(_require_key)):
     - **high_quality_only**: skip papers without meaningful abstracts
     - **sources**: optional subset of databases
 
-    Returns 503 with a Retry-After header when the server is busy.
+    Without an API key: 20 searches per day per IP; free keys from /signup: 1,000/day.
+    Returns 429 when the daily limit is reached and 503 (Retry-After) when the server is busy.
     """
-    max_top_k, max_chars = ((INTERNAL_MAX_TOP_K, INTERNAL_MAX_QUERY_CHARS) if tier == "internal"
+    max_top_k, max_chars = ((INTERNAL_MAX_TOP_K, INTERNAL_MAX_QUERY_CHARS) if caller.tier == "internal"
                             else (PUBLIC_MAX_TOP_K, PUBLIC_MAX_QUERY_CHARS))
     if req.top_k > max_top_k:
         raise HTTPException(status_code=422, detail=f"top_k must be between 1 and {max_top_k}.")
@@ -498,6 +641,7 @@ async def search(req: SearchRequest, tier: str = Depends(_require_key)):
         raise HTTPException(status_code=422, detail=f"query must be at most {max_chars} characters.")
     if req.start_date and req.end_date and req.start_date > req.end_date:
         raise HTTPException(status_code=422, detail="start_date must not be after end_date.")
+    _charge(caller, response)
 
     try:
         return await run_search(
@@ -513,17 +657,120 @@ async def search(req: SearchRequest, tier: str = Depends(_require_key)):
                             detail=str(exc)) from None
 
 
-@app.post("/keys/generate", tags=["admin"],
-          summary="Generate a new random API key (requires X-Admin-Secret header)",
-          dependencies=[Depends(_require_admin)])
-async def generate_key(prefix: str = "mss"):
+@app.post("/v1/similar", response_model=SearchResponse, tags=["search"],
+          summary="Papers similar to one or more example papers")
+async def similar(req: SimilarRequest, response: Response, caller: Caller = Depends(_caller)):
     """
-    Generates a secure random API key. The key is NOT saved automatically —
-    append it to api_keys.txt and restart the service.
+    "More like this": pass the `ref` of one or more results (up to 20). Their stored
+    embeddings are averaged into one query; the examples themselves are left out.
     """
-    token = f"{prefix}_{secrets.token_urlsafe(32)}"
-    return {"api_key": token,
-            "note": f"Add this key to {API_KEYS_FILE} (one key per line) and restart the server."}
+    max_top_k = INTERNAL_MAX_TOP_K if caller.tier == "internal" else PUBLIC_MAX_TOP_K
+    if req.top_k > max_top_k:
+        raise HTTPException(status_code=422, detail=f"top_k must be between 1 and {max_top_k}.")
+    if req.start_date and req.end_date and req.start_date > req.end_date:
+        raise HTTPException(status_code=422, detail="start_date must not be after end_date.")
+    _charge(caller, response)
+    try:
+        return await run_similar(req.refs, req.top_k,
+                                 req.start_date.isoformat() if req.start_date else None,
+                                 req.end_date.isoformat() if req.end_date else None,
+                                 req.high_quality_only, req.sources)
+    except BadReference as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except ServerBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from None
+    except SearchFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from None
+
+
+# ---------------------------------------------------------------------------
+# Self-service API keys (/signup)
+# ---------------------------------------------------------------------------
+TURNSTILE_SITEKEY = os.environ.get("MSS_TURNSTILE_SITEKEY", "")
+TURNSTILE_SECRET = os.environ.get("MSS_TURNSTILE_SECRET", "")
+SMTP = {k: os.environ.get(f"MSS_SMTP_{k.upper()}", "") for k in ("host", "port", "user", "password", "from")}
+SIGNUP_ENABLED = bool(TURNSTILE_SITEKEY and TURNSTILE_SECRET and SMTP["host"] and SMTP["from"])
+_EMAIL_RE = __import__("re").compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
+
+
+class KeyRequest(BaseModel):
+    email: str = Field(..., max_length=254)
+    turnstile_token: str = Field(..., max_length=4096)
+
+
+def _send_key_email(to: str, key: str):
+    import smtplib
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = "Your Manuscript Search API key"
+    msg["From"], msg["To"] = SMTP["from"], to
+    msg.set_content(
+        f"Here is your API key:\n\n    {key}\n\n"
+        f"Use it in the X-API-Key header (REST) or as a Bearer token (MCP at /mcp).\n"
+        f"Limit: {access.LIMITS['free']} searches per day. Docs: https://manuscript-search.org/docs\n\n"
+        "If you did not request this key, ignore this email.")
+    with smtplib.SMTP(SMTP["host"], int(SMTP["port"] or 587), timeout=30) as smtp:
+        smtp.starttls()
+        if SMTP["user"]:
+            smtp.login(SMTP["user"], SMTP["password"])
+        smtp.send_message(msg)
+
+
+@app.get("/signup", response_class=HTMLResponse, include_in_schema=False)
+async def signup_page():
+    with open(os.path.join(_HERE, "signup.html")) as f:
+        page = f.read()
+    if SIGNUP_ENABLED:
+        form = (f'<form id="f"><label for="email">Email address</label>'
+                f'<input id="email" name="email" type="email" required autocomplete="email">'
+                f'<div class="cf-turnstile" data-sitekey="{TURNSTILE_SITEKEY}"></div>'
+                f'<button id="b" type="submit">Email me a key</button></form><p id="result" role="status"></p>')
+        script = ("<script>document.getElementById('f').addEventListener('submit', async e => {"
+                  "e.preventDefault(); const b=document.getElementById('b'); b.disabled=true;"
+                  "const r=await fetch('/v1/keys/request',{method:'POST',headers:{'Content-Type':'application/json'},"
+                  "body:JSON.stringify({email:document.getElementById('email').value,"
+                  "turnstile_token:(document.querySelector('[name=cf-turnstile-response]')||{}).value||''})});"
+                  "const j=await r.json(); document.getElementById('result').textContent=j.message||j.detail;"
+                  "b.disabled=false; if(window.turnstile) turnstile.reset();});</script>")
+        turnstile = '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>'
+    else:
+        form = ("<p><strong>Self-service keys are coming soon.</strong> Until then you can use the "
+                "API without a key, within the daily limit above.</p>")
+        script = turnstile = ""
+    page = (page.replace("{form}", form).replace("{form_script}", script).replace("{turnstile_script}", turnstile)
+                .replace("{anon}", f"{access.LIMITS['anonymous']:,}").replace("{free}", f"{access.LIMITS['free']:,}"))
+    return HTMLResponse(page)
+
+
+@app.post("/v1/keys/request", include_in_schema=False)
+async def request_key(req: KeyRequest, request: Request):
+    if not SIGNUP_ENABLED:
+        raise HTTPException(status_code=503, detail="Self-service keys are not enabled yet.")
+    email = req.email.strip()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Please enter a valid email address.")
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    ip = _client_ip(request.client.host if request.client else None, headers)
+    reason = await asyncio.to_thread(access.signup_allowed, ip, email)
+    if reason:
+        raise HTTPException(status_code=429, detail=reason)
+
+    def _verify() -> bool:
+        import requests as _rq
+        r = _rq.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", timeout=15,
+                     data={"secret": TURNSTILE_SECRET, "response": req.turnstile_token, "remoteip": ip})
+        return bool(r.ok and r.json().get("success"))
+
+    if not await asyncio.to_thread(_verify):
+        raise HTTPException(status_code=400, detail="The bot check failed; please try again.")
+    await asyncio.to_thread(access.record_signup, ip, email)
+    key = await asyncio.to_thread(access.create_key, "free", "self-service", email)
+    try:
+        await asyncio.to_thread(_send_key_email, email, key)
+    except Exception:
+        LOGGER.exception("Signup email failed")
+        raise HTTPException(status_code=502, detail="We could not send the email; please try again later.") from None
+    return {"message": f"Done — your key is on its way to {email}."}
 
 
 # ---------------------------------------------------------------------------

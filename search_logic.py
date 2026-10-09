@@ -11,7 +11,9 @@ import pandas as pd
 from pathlib import Path
 import concurrent.futures
 from collections import OrderedDict
+from aux_index import AuxIndex
 from data_handler import fetch_specific_rows, build_sorted_intervals_from_metadata, clear_parquet_cache
+from identifiers import identifier_tokens, token_hash
 from utils import log_time
 
 LOGGER = logging.getLogger(__name__)
@@ -238,6 +240,111 @@ class ChunkedSearcher:
         self.intervals = build_sorted_intervals_from_metadata(self.metadata)
         self.data_problem = self._check_alignment()
 
+        # Auxiliary indexes (identifier postings; PubMed superseded rows).
+        self.source_name = config.get("source_name")
+        root = config.get("aux_index_root")
+        self.aux = AuxIndex(root, self.source_name) if root and self.source_name else None
+        self._superseded_bits = None
+        self.superseded_count = 0
+        self._aux_stem_starts = None
+        self._refresh_aux(force=True)
+
+    # ------------------------------------------------------------------
+    # Auxiliary indexes
+    # ------------------------------------------------------------------
+
+    def _stem_starts(self) -> np.ndarray:
+        """Global row id of row 0 of each aux-index file stem (-1 if not indexed here)."""
+        starts = {iv["source_stem"]: iv["global_start"] - iv["source_local_start"] for iv in self.intervals}
+        return np.array([starts.get(s, -1) for s in self.aux.stems], dtype=np.int64)
+
+    def _refresh_aux(self, force: bool = False) -> bool:
+        """Loads a newer aux index version; rebuilds row mappings when it or the chunks changed."""
+        if self.aux is None:
+            return False
+        changed = self.aux.refresh()
+        if not (changed or force) or not self.aux.loaded:
+            return changed
+        self._aux_stem_starts = self._stem_starts()
+        total = int(self.metadata.get("total_rows", 0))
+        bits, count = None, 0
+        if self.aux.superseded is not None and total:
+            sid, row = self.aux.superseded
+            start = self._aux_stem_starts[sid]
+            g = start + row.astype(np.int64)
+            ok = (start >= 0) & (g < total)
+            mask = np.zeros(total, dtype=bool)
+            mask[g[ok]] = True
+            count = int(mask.sum())
+            bits = np.packbits(mask)
+        self._superseded_bits, self.superseded_count = bits, count
+        if count:
+            LOGGER.info(f"{self.source_name}: hiding {count:,} superseded record versions")
+        return True
+
+    def is_superseded(self, gids: np.ndarray) -> np.ndarray:
+        gids = np.asarray(gids, dtype=np.int64)
+        if self._superseded_bits is None or not len(gids):
+            return np.zeros(len(gids), dtype=bool)
+        return ((self._superseded_bits[gids >> 3] >> (7 - (gids & 7))) & 1).astype(bool)
+
+    def codes_for(self, gids):
+        """Stored binary codes for global row ids (from the in-memory FAISS indexes)."""
+        gids = np.asarray(gids, dtype=np.int64)
+        dim = int(self.metadata.get("embedding_dim", 48))
+        out = np.zeros((len(gids), dim), dtype=np.uint8)
+        found = np.zeros(len(gids), dtype=bool)
+        for chunk in self.metadata.get("chunks", []):
+            gs, n = chunk["global_start"], chunk.get("actual_rows", 0)
+            m = (gids >= gs) & (gids < gs + n)
+            if not m.any():
+                continue
+            index = _get_or_build_faiss_index(os.path.join(self.chunk_dir, chunk["chunk_file"]), n, dim)
+            out[m] = np.stack([index.reconstruct(int(g - gs)) for g in gids[m]])
+            found[m] = True
+        return out, found
+
+    def exact_candidates(self, token_hashes: dict, query_float=None, query_packed=None) -> list:
+        """
+        Documents containing the query's identifier tokens, scored like semantic
+        candidates (float-query rescoring of their stored codes) plus a boost
+        that grows with the share of query identifiers they contain.
+        """
+        if self.aux is None or not self.aux.loaded or not token_hashes or self._aux_stem_starts is None:
+            return []
+        per_token = {}
+        for tok, h in token_hashes.items():
+            p = self.aux.postings(h)
+            if p is None:
+                continue
+            sid, row = p
+            start = self._aux_stem_starts[sid]
+            ok = start >= 0
+            per_token[tok] = np.unique(start[ok] + row[ok].astype(np.int64))
+        if not per_token:
+            return []
+        all_g = np.unique(np.concatenate(list(per_token.values())))
+        all_g = all_g[~self.is_superseded(all_g)]
+        if not len(all_g):
+            return []
+        hits = np.stack([np.isin(all_g, v) for v in per_token.values()], axis=1)   # docs x tokens
+        order = np.argsort(-hits.sum(axis=1), kind="stable")[:EXACT_MAX_DOCS]
+        all_g, hits = all_g[order], hits[order]
+        codes, found = self.codes_for(all_g)
+        all_g, hits, codes = all_g[found], hits[found], codes[found]
+        if query_float is not None:
+            scores = rescore_with_float_query(query_float, codes)
+        else:
+            scores = 1.0 - np.unpackbits(codes ^ np.asarray(query_packed).reshape(1, -1), axis=1).sum(1) / (codes.shape[1] * 8)
+        share = hits.sum(axis=1) / len(token_hashes)
+        boost = np.where(share >= 1.0, EXACT_BOOST, EXACT_BOOST * 0.5 * share)
+        tokens = list(per_token)
+        return [
+            {"corpus_id": int(g), "score": float(sc + b),
+             "matched_terms": [tokens[j] for j in np.flatnonzero(h)]}
+            for g, sc, b, h in zip(all_g, scores, boost, hits)
+        ]
+
     def _check_alignment(self):
         """
         For sources whose metadata lives in one combined parquet (bioRxiv,
@@ -342,6 +449,10 @@ class ChunkedSearcher:
                 self._meta_mtime = self._current_meta_mtime()
                 self.intervals = build_sorted_intervals_from_metadata(self.metadata)
             self.data_problem = self._check_alignment()
+            self._refresh_aux(force=True)
+            return True
+        if self._refresh_aux():
+            _invalidate_result_cache()
             return True
         return False
 
@@ -761,6 +872,9 @@ class ChunkedSearcher:
             valid = indices[0] != -1
             local_ids = indices[0][valid]
             scores = 1.0 - distances[0][valid] / d_bits
+            if self._superseded_bits is not None and len(local_ids):
+                keep = ~self.is_superseded(global_start + local_ids.astype(np.int64))
+                local_ids, scores = local_ids[keep], scores[keep]
 
             if query_float is not None and len(local_ids):
                 codes = np.stack([index.reconstruct(int(i)) for i in local_ids])
@@ -827,7 +941,14 @@ RESULT_COLUMNS = [
     # ClinicalTrials.gov
     "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
     "corpus_id",   # global row id; within PubMed, a larger id = a newer record version
+    "matched_terms",   # identifier tokens of the query found in this document
 ]
+
+# Exact-term matching: candidates per source and score boost when a document
+# contains every identifier of the query (scores are cosines mapped to [0, 1]).
+EXACT_MAX_DOCS = 2000
+EXACT_BOOST = 0.06
+MAX_QUERY_IDENTIFIERS = 6
 
 
 def _norm_doi(value) -> str:
@@ -940,7 +1061,7 @@ def rescore_with_float_query(query_float, codes) -> np.ndarray:
 
 def combined_search_orchestrator(
     query_packed, configs, top_k, start_date=None, end_date=None, use_high_quality=False,
-    query_float=None,
+    query_float=None, query_text=None,
 ):
     """
     Orchestrates search across all sources with live deduplication.
@@ -956,6 +1077,7 @@ def combined_search_orchestrator(
         None if query_float is None else np.asarray(query_float, dtype=np.float32).tobytes(),
         tuple(cfg.get("chunk_dir") for cfg in configs if cfg),
         top_k, start_date, end_date, bool(use_high_quality),
+        tuple(sorted(identifier_tokens(query_text))) if query_text else (),
     )
     with _RESULT_CACHE_LOCK:
         cache_key += (_INDEX_GENERATION,)
@@ -966,7 +1088,7 @@ def combined_search_orchestrator(
             return cached.copy()
 
     result_df = _run_search(query_packed, configs, top_k, start_date, end_date,
-                            use_high_quality, query_float)
+                            use_high_quality, query_float, query_text)
 
     with _RESULT_CACHE_LOCK:
         if cache_key[-1] == _INDEX_GENERATION and not result_df.empty:
@@ -1042,8 +1164,11 @@ def _candidate_batches(candidates, batch_size, date_filter, searchers):
         pending = pending[batch_size:]
 
 
-def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_quality, query_float):
+def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_quality, query_float,
+                query_text=None):
     """The uncached search behind combined_search_orchestrator."""
+    tokens = sorted(identifier_tokens(query_text))[:MAX_QUERY_IDENTIFIERS] if query_text else []
+    token_hashes = {t: token_hash(t) for t in tokens}
     sources_map = {
         name: cfg
         for name, cfg in zip(_SOURCE_NAMES, configs)
@@ -1067,6 +1192,15 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         candidates = searcher.find_candidates_raw(
             query_packed, limit=raw_retrieval_limit, query_float=query_float
         )
+        if token_hashes:
+            by_id = {c["corpus_id"]: c for c in candidates}
+            for e in searcher.exact_candidates(token_hashes, query_float, query_packed):
+                c = by_id.get(e["corpus_id"])
+                if c is None:
+                    candidates.append(e)
+                else:
+                    c["score"] = max(c["score"], e["score"])
+                    c["matched_terms"] = e["matched_terms"]
         for c in candidates:
             c["source"] = source_name
         return source_name, searcher, candidates
@@ -1207,6 +1341,74 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         result_df.loc[preprint_mask, "source"] = "BioRxiv"
 
     return result_df.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# "More like this": search with the stored vectors of example documents
+# ---------------------------------------------------------------------------
+
+class UnknownReference(ValueError):
+    """A reference that does not point to an indexed document."""
+
+
+def parse_ref(ref: str):
+    source, _, cid = str(ref).partition(":")
+    if source not in _SOURCE_NAMES or not cid.isdigit():
+        raise UnknownReference(f"invalid reference {ref!r}; expected e.g. 'PubMed:123456'")
+    return source, int(cid)
+
+
+def similar_search(refs, all_configs, search_configs, top_k, start_date=None, end_date=None,
+                   use_high_quality=False):
+    """
+    Finds documents similar to one or more example documents (refs like
+    'PubMed:123'). The examples' stored ±1 codes are averaged into a float
+    query, so several examples act as one "more like these" query. Returns
+    (results DataFrame without the examples, list of example row dicts,
+    packed query code).
+    """
+    by_name = dict(zip(_SOURCE_NAMES, all_configs))
+    signs, seeds = [], []
+    for ref in refs:
+        source, cid = parse_ref(ref)
+        cfg = by_name.get(source)
+        if not cfg:
+            raise UnknownReference(f"{source} is not indexed on this server")
+        searcher = get_or_create_searcher(cfg)
+        codes, found = searcher.codes_for([cid])
+        if not found[0]:
+            raise UnknownReference(f"{ref} does not exist")
+        signs.append(np.unpackbits(codes[0]).astype(np.float32) * 2 - 1)
+        row = searcher.fetch_rows([{"corpus_id": cid, "score": 1.0}])
+        seed = row.iloc[0].to_dict() if not row.empty else {"corpus_id": cid}
+        seed["source"] = source
+        seeds.append(seed)
+
+    q = np.mean(signs, axis=0)
+    norm = np.linalg.norm(q)
+    if norm == 0:
+        raise UnknownReference("the examples cancel each other out; choose fewer or closer examples")
+    q_float = (q / norm).astype(np.float32)
+    packed = np.packbits(q_float > 0)[np.newaxis, :]
+
+    df = combined_search_orchestrator(packed, search_configs, top_k + 3 * len(seeds),
+                                      start_date, end_date, use_high_quality, q_float)
+    if df.empty:
+        return df, seeds, packed
+    seed_ids = {(sd["source"], int(sd["corpus_id"])) for sd in seeds}
+    seed_keys = {k for sd in seeds for k in (_norm_doi(sd.get("doi")), _norm_doi(sd.get("published_doi")),
+                                             f"pmid:{sd.get('pmid')}" if str(sd.get("pmid") or "").isdigit() else "",
+                                             _title_key(sd.get("title"))) if k}
+
+    def is_seed(r) -> bool:
+        if (r.get("source"), int(r.get("corpus_id", -1))) in seed_ids:
+            return True
+        keys = {_norm_doi(r.get("doi")), _norm_doi(r.get("published_doi")), _norm_doi(r.get("preprint_doi")),
+                f"pmid:{r.get('pmid')}" if str(r.get("pmid") or "").isdigit() else "", _title_key(r.get("title"))}
+        return bool((keys - {""}) & seed_keys)
+
+    keep = [not is_seed(r) for r in df.to_dict("records")]
+    return df[keep].head(top_k).reset_index(drop=True), seeds, packed
 
 
 def trigger_database_updates(configs, *, force: bool = False) -> bool:

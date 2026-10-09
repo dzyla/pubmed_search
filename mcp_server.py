@@ -43,7 +43,7 @@ def _parse_date(value: Optional[str], name: str) -> Optional[str]:
         raise ToolError(f"{name} must be YYYY-MM-DD, got {value!r}") from exc
 
 
-def build_mcp(search: SearchFn, stats: StatsFn, max_top_k: int = 10) -> FastMCP:
+def build_mcp(search: SearchFn, stats: StatsFn, similar: SearchFn = None, max_top_k: int = 10) -> FastMCP:
     mcp = FastMCP(
         "Manuscript Search",
         instructions=INSTRUCTIONS,
@@ -98,6 +98,42 @@ def build_mcp(search: SearchFn, stats: StatsFn, max_top_k: int = 10) -> FastMCP:
             for paper in result.get("results", []):
                 paper.pop("abstract", None)
         return result
+
+    if similar is not None:
+        @mcp.tool()
+        async def find_similar(
+            paper_refs: list[str],
+            top_k: int = 10,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+            sources: Optional[list[str]] = None,
+            include_abstracts: bool = True,
+        ) -> dict[str, Any]:
+            """
+            Papers similar to one or more example papers ("more like these").
+
+            Args:
+                paper_refs: 1-20 'ref' values from search_papers results, e.g. ["PubMed:123456"].
+                    Several examples are combined into one query.
+                top_k: Number of results, 1-10.
+                start_date / end_date: Optional publication date range (YYYY-MM-DD).
+                sources: Optional subset of databases to search.
+                include_abstracts: Set false for a compact list.
+            """
+            if not 1 <= len(paper_refs) <= 20:
+                raise ToolError("paper_refs must contain 1-20 references")
+            if not 1 <= top_k <= max_top_k:
+                raise ToolError(f"top_k must be between 1 and {max_top_k}")
+            start, end = _parse_date(start_date, "start_date"), _parse_date(end_date, "end_date")
+            try:
+                result = await similar(refs=paper_refs, top_k=top_k, start_date=start, end_date=end,
+                                       sources=sources)
+            except SearchFailed as exc:
+                raise ToolError(str(exc)) from exc
+            if not include_abstracts:
+                for paper in result.get("results", []) + result.get("seeds", []):
+                    paper.pop("abstract", None)
+            return result
 
     @mcp.tool()
     async def database_info() -> dict[str, Any]:

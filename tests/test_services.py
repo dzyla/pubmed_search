@@ -21,14 +21,17 @@ def fake_encode(text):
 
 
 @pytest.fixture(scope="module")
-def backend(corpus_module):
+def backend(corpus_module, tmp_path_factory):
+    import access
     import embedder
     import search_api
 
     config, _ = corpus_module
     with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(access, "DB_PATH", str(tmp_path_factory.mktemp("access") / "access.sqlite3"))
+        access.create_key("free", label="test", key="pub-key")
+        mp.setattr(search_api, "API_KEYS_FILE", "/nonexistent/api_keys.txt")
         mp.setattr(search_api, "CONFIGS", [config, {}, {}, {}])
-        mp.setattr(search_api, "VALID_KEYS", {"pub-key"})
         mp.setattr(search_api, "INTERNAL_KEY", "int-key")
         mp.setattr(embedder, "load_model", lambda: None)
         mp.setattr(embedder, "is_loaded", lambda: True)
@@ -95,10 +98,28 @@ def test_bad_dates_are_rejected_with_422(backend, body):
     assert _search(client, **body).status_code == 422
 
 
-def test_missing_key_is_rejected(backend):
+def _behind_local_proxy(monkeypatch):
+    """The test client is not 127.0.0.1; pretend requests come through the local nginx."""
+    import search_api
+    monkeypatch.setattr(search_api, "_client_ip", lambda host, headers: headers.get("x-real-ip", host))
+
+
+def test_keys_tiers_and_quota(backend, monkeypatch):
+    import access
+
     client, _ = backend
-    assert client.post("/search", json={"query": "abc"}).status_code == 401
     assert client.post("/search", json={"query": "abc"}, headers={"X-API-Key": "nope"}).status_code == 401
+    r = _search(client, query="free tier query")
+    assert r.status_code == 200 and int(r.headers["x-ratelimit-limit"]) == access.LIMITS["free"]
+    assert "x-ratelimit-limit" not in _search(client, headers=INTERNAL, query="ui query").headers
+
+    _behind_local_proxy(monkeypatch)
+    monkeypatch.setitem(access.LIMITS, "anonymous", 2)
+    anon = {"X-Real-IP": "203.0.113.7"}
+    codes = [client.post("/search", json={"query": f"anonymous {i}"}, headers=anon).status_code for i in range(3)]
+    assert codes == [200, 200, 429]
+    r = client.post("/search", json={"query": "anonymous again"}, headers=anon)
+    assert "/signup" in r.json()["detail"] and int(r.headers["retry-after"]) > 0
 
 
 def test_internal_errors_are_not_leaked(backend, monkeypatch):
@@ -135,10 +156,48 @@ def _rpc(client, method, params=None, rid=1, headers=MCP_HEADERS):
                        json={"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
 
 
-def test_mcp_requires_key(backend):
+def test_mcp_anonymous_and_invalid_key(backend):
     client, _ = backend
-    r = _rpc(client, "tools/list", headers={k: v for k, v in MCP_HEADERS.items() if k != "X-API-Key"})
-    assert r.status_code == 401
+    no_key = {k: v for k, v in MCP_HEADERS.items() if k != "X-API-Key"}
+    assert _rpc(client, "tools/list", headers=no_key).status_code == 200
+    assert _rpc(client, "tools/list", headers={**no_key, "X-API-Key": "nope"}).status_code == 401
+
+
+def test_mcp_search_calls_count_against_quota(backend, monkeypatch):
+    import access
+
+    client, _ = backend
+    _behind_local_proxy(monkeypatch)
+    monkeypatch.setitem(access.LIMITS, "anonymous", 1)
+    headers = {**{k: v for k, v in MCP_HEADERS.items() if k != "X-API-Key"}, "X-Real-IP": "198.51.100.9"}
+    call = {"name": "search_papers", "arguments": {"query": "quota test query", "top_k": 1}}
+    assert _rpc(client, "tools/call", call, headers=headers).status_code == 200
+    assert _rpc(client, "tools/call", call, headers=headers).status_code == 429
+    assert _rpc(client, "tools/list", headers=headers).status_code == 200      # listing is free
+
+
+def test_signup_disabled_until_configured(backend):
+    client, _ = backend
+    page = client.get("/signup")
+    assert page.status_code == 200 and "coming soon" in page.text and "searches per day" in page.text
+    r = client.post("/v1/keys/request", json={"email": "a@b.org", "turnstile_token": "x"})
+    assert r.status_code == 503
+
+
+def test_access_keys_cli_functions(tmp_path, monkeypatch):
+    import access
+
+    monkeypatch.setattr(access, "DB_PATH", str(tmp_path / "a.sqlite3"))
+    legacy = tmp_path / "api_keys.txt"
+    legacy.write_text("# comment\nlegacy-key-1\n\n")
+    assert access.import_legacy_keys(str(legacy)) == 1 and access.import_legacy_keys(str(legacy)) == 0
+    assert access.lookup("legacy-key-1")[0] == "partner"
+    key = access.create_key("free", email="x@y.org")
+    assert access.lookup(key)[0] == "free"
+    assert access.signup_allowed("1.2.3.4", "x@y.org") is None
+    access.record_signup("1.2.3.4", "x@y.org")          # revokes older free keys of this address
+    assert access.lookup(key) is None
+    assert access.signup_allowed("1.2.3.4", "x@y.org") is not None
 
 
 def test_mcp_initialize_list_and_call(backend):
@@ -150,7 +209,7 @@ def test_mcp_initialize_list_and_call(backend):
     assert init.json()["result"]["serverInfo"]["name"] == "Manuscript Search"
 
     tools = _rpc(client, "tools/list", rid=2).json()["result"]["tools"]
-    assert {t["name"] for t in tools} == {"search_papers", "database_info"}
+    assert {t["name"] for t in tools} == {"search_papers", "database_info", "find_similar"}
 
     call = _rpc(client, "tools/call", {"name": "search_papers", "arguments": {
         "query": "binary embeddings for literature search", "top_k": 3,
@@ -205,3 +264,27 @@ def test_active_users_migrates_legacy_table(tmp_path, monkeypatch):
     monkeypatch.setattr(ui_data.st, "session_state", FakeSessionState())
     assert ui_data.get_current_active_users(str(db)) == 2
     assert ui_data.get_current_active_users(str(db)) == 2
+
+
+def test_similar_endpoint_and_mcp_tool(backend):
+    client, _ = backend
+    ref = _search(client, top_k=3).json()["results"][0]["ref"]
+    assert ref.startswith("PubMed:")
+    r = client.post("/v1/similar", json={"refs": [ref], "top_k": 5}, headers=PUBLIC)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_results"] == 5 and body["seeds"][0]["ref"] == ref
+    assert ref not in {p["ref"] for p in body["results"]}
+    assert client.post("/v1/similar", json={"refs": ["PubMed:99999999"]}, headers=PUBLIC).status_code == 422
+    assert client.post("/v1/similar", json={"refs": ["nonsense"]}, headers=PUBLIC).status_code == 422
+
+    call = _rpc(client, "tools/call", {"name": "find_similar", "arguments": {
+        "paper_refs": [ref], "top_k": 3, "include_abstracts": False}}, rid=9).json()["result"]
+    assert not call.get("isError"), call
+    assert len(call["structuredContent"]["results"]) == 3
+
+
+def test_forwarded_ip_trusted_only_from_local_proxy():
+    import search_api
+    assert search_api._client_ip("127.0.0.1", {"x-real-ip": "203.0.113.5"}) == "203.0.113.5"
+    assert search_api._client_ip("198.51.100.2", {"x-real-ip": "203.0.113.5"}) == "198.51.100.2"
