@@ -236,6 +236,33 @@ class ChunkedSearcher:
         # Pre-build interval list once; passed to every fetch_rows call to avoid
         # rebuilding from the metadata JSON on every query.
         self.intervals = build_sorted_intervals_from_metadata(self.metadata)
+        self.data_problem = self._check_alignment()
+
+    def _check_alignment(self):
+        """
+        For sources whose metadata lives in one combined parquet (bioRxiv,
+        medRxiv), row i of the parquet must describe embedding row i. A row-count
+        mismatch (e.g. an update that wrote the .npy but not the parquet) would
+        show the wrong paper for every hit, so the source is taken out of search.
+        Returns a problem description, or None.
+        """
+        if not self.combined_data_file or not os.path.exists(self.combined_data_file):
+            return None
+        stems = {p.get("source_stem") for c in self.metadata.get("chunks", []) for p in c.get("parts", [])}
+        if len(stems) != 1 or os.path.exists(os.path.join(self.data_folder, f"{next(iter(stems))}.parquet")):
+            return None
+        try:
+            import pyarrow.parquet as pq
+            parquet_rows = pq.ParquetFile(self.combined_data_file).metadata.num_rows
+        except Exception as e:
+            return f"cannot read {self.combined_data_file}: {e}"
+        index_rows = self.metadata.get("total_rows", 0)
+        if parquet_rows != index_rows:
+            problem = (f"{os.path.basename(self.combined_data_file)} has {parquet_rows:,} rows but the index "
+                       f"has {index_rows:,} embeddings — source disabled until they match")
+            LOGGER.error(f"Data alignment problem in {self.chunk_dir}: {problem}")
+            return problem
+        return None
 
     # ------------------------------------------------------------------
     # Metadata
@@ -304,12 +331,14 @@ class ChunkedSearcher:
         self.was_updated = False
         externally_changed = self._reload_metadata_if_externally_changed()
         self._ensure_chunks_exist()
-        if self.was_updated:
-            self.metadata = self._load_metadata()
-            self._meta_mtime = self._current_meta_mtime()
-            self.intervals = build_sorted_intervals_from_metadata(self.metadata)
+        if self.was_updated or externally_changed:
+            if self.was_updated:
+                self.metadata = self._load_metadata()
+                self._meta_mtime = self._current_meta_mtime()
+                self.intervals = build_sorted_intervals_from_metadata(self.metadata)
+            self.data_problem = self._check_alignment()
             return True
-        return externally_changed
+        return False
 
     def _ensure_chunks_exist(self):
         if not os.path.exists(self.metadata_path):
@@ -1008,6 +1037,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     # --- 1. Retrieve raw candidates from all sources in parallel ---
     def _search_source(source_name, config):
         searcher = get_or_create_searcher(config)
+        if searcher.data_problem:
+            return source_name, searcher, []
         candidates = searcher.find_candidates_raw(
             query_packed, limit=raw_retrieval_limit, query_float=query_float
         )
