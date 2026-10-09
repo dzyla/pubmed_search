@@ -28,7 +28,6 @@ async def lifespan(app: FastAPI):
         model = SentenceTransformer(
             MODEL_ID, 
             device=device,
-            trust_remote_code=True,
             model_kwargs={
                 # Use FP16 on GPU for speed, Float32 on CPU for compatibility
                 "dtype": torch.float16 if device == "cuda" else torch.float32,
@@ -70,19 +69,22 @@ class QueryRequest(BaseModel):
 # -----------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    """Returns service liveness and which model is loaded."""
+    """Returns 200 with the model name once the model is loaded, 503 otherwise."""
+    if "model" not in model_context:
+        raise HTTPException(status_code=503, detail="Model not loaded")
     return {"status": "ok", "model": MODEL_ID}
 
 
+# Plain def: FastAPI runs it in its threadpool, so a CPU-bound encode does not
+# block the event loop (and /health) while it runs.
 @app.post("/encode")
-async def encode(request: QueryRequest):
+def encode(request: QueryRequest):
     model = model_context.get("model")
     if not model:
         raise HTTPException(status_code=500, detail="Model not loaded")
 
     # BGE instruction is critical for query performance
     text_with_prefix = QUERY_PREFIX + request.text.strip()
-    print(f"Encoding query: {request.text.strip()}")
     
     with torch.no_grad():
         # 1. Generate Float Embeddings (Normalized)
