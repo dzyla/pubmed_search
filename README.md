@@ -1,7 +1,8 @@
 # Manuscript Search
 
-Semantic search over ~49 million scientific abstracts (PubMed, bioRxiv, medRxiv,
-arXiv) — [manuscript-search.org](https://manuscript-search.org). Describe a finding
+Semantic search over ~50 million scientific abstracts and trial registrations
+(PubMed, bioRxiv, medRxiv, arXiv, ClinicalTrials.gov) —
+[manuscript-search.org](https://manuscript-search.org). Describe a finding
 or paste an abstract; papers are ranked by meaning, not keywords.
 
 ## How it fits together
@@ -61,6 +62,7 @@ Local stdio bridge (for clients without remote MCP support):
   "env": {"MSS_API_KEY": "<key>"}}}}
 ```
 Tools: `search_papers(query, top_k, start_date, end_date, sources, include_abstracts)`
+(sources: PubMed, BioRxiv, MedRxiv, arXiv, ClinicalTrials)
 and `database_info()`.
 
 ## Deploy

@@ -10,7 +10,7 @@ practical incremental update path.*
 
 | Rank | Source | Docs | RAM | Why |
 |---|---|---|---|---|
-| 1 | ClinicalTrials.gov | ~606k trials | ~29 MB | Unique content, US-gov data (attribution only), daily delta filter |
+| 1 | ClinicalTrials.gov — **added 2026-10-09** (`update_database/clinicaltrials_update.py`, weekly) | 606,601 trials | 28 MB | Unique content, US-gov data (attribution only), daily delta filter |
 | 2 | Europe PMC preprints (minus bioRxiv/medRxiv/arXiv) | ~800k | ~27–38 MB | Research Square, Preprints.org, PsyArXiv, Authorea; per-record licence; daily deltas; `HAS_PUBLISHED_VERSION` for dedup |
 | 3 | Crossref posted-content: ChemRxiv, TechRxiv, EarthArXiv, SocArXiv, ESS Open Archive | ~190k | ~9 MB | Almost no PubMed overlap; pull by DOI prefix |
 | 4 | NIH RePORTER grant abstracts (one per core project) | ~0.6–1.0M (estimate) | ~30–50 MB | Distinct content type ("who is funded to work on X"); best as a separate "Grants" filter |

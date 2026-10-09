@@ -5,7 +5,7 @@ Guidance for Claude Code in this repository.
 ## What this is
 
 Manuscript Search (manuscript-search.org): semantic search over ~49M abstracts
-(PubMed, bioRxiv, medRxiv, arXiv). Queries are embedded with BAAI/bge-small-en-v1.5,
+(PubMed, bioRxiv, medRxiv, arXiv) plus 0.6M ClinicalTrials.gov registrations. Queries are embedded with BAAI/bge-small-en-v1.5,
 binarized to 384 bits, searched with FAISS `IndexBinaryFlat` over chunked memmapped
 `.npy` files, re-ranked with the float query, and joined to parquet metadata.
 
@@ -43,6 +43,8 @@ Use the `pubmed_search` conda env locally (same streamlit/pandas/faiss as the se
 - **Don't trigger needless recomputation**: changing a source `.npy` mtime makes the
   backend rebuild that source's chunks; extending the last chunk must only evict that
   chunk's index.
+- PubMed's daily update files re-issue revised records under the same PMID; the index
+  holds ~4.4M older versions. Dedup keeps the newest (largest `corpus_id`).
 - PubMed vectors were embedded **with** the BGE query prefix, the other sources
   without (`eval/README.md`); the measured effect on ranking is negligible.
 - bioRxiv/medRxiv: row i of the combined parquet ↔ row i of the `.npy`. A row-count
@@ -57,7 +59,8 @@ Use the `pubmed_search` conda env locally (same streamlit/pandas/faiss as the se
 
 `update_database/` scripts run on the lab desktop GPU from this repo's checkout
 (cron there; paths hardcoded to `/mnt/h/...`): bioRxiv/medRxiv 02:00, PubMed
-02:10/02:15 nightly, arXiv weekly (Sun 01:30, `arxiv_oai_update.py` via OAI-PMH);
+02:10/02:15 nightly, arXiv weekly (Sun 01:30, `arxiv_oai_update.py` via OAI-PMH),
+ClinicalTrials.gov weekly (Sun 01:45, `clinicaltrials_update.py`, API v2);
 02:30 rsync of `snowflake/` (.npy + .parquet) to the server, where the backend
 picks the files up within the hour. Editing these scripts changes production data.
 

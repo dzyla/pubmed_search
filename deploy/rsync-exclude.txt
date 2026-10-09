@@ -7,3 +7,4 @@ api_keys.txt
 *.db
 *.sqlite3
 eval/
+gpu_locks/

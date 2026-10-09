@@ -15,3 +15,5 @@ build/
 api_keys.txt
 .env
 .pytest_cache/
+update_database/gpu_locks/
+update_database/**/gpu_locks/
