@@ -3,7 +3,7 @@ import sys
 import streamlit as st
 import pandas as pd
 import concurrent.futures
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 logging.basicConfig(
@@ -18,6 +18,7 @@ from api_handler import get_query_embedding_packed, EmbeddingError
 import search_logic
 import ui_components
 import gemini_handler
+import paper_links
 
 LOGGER = logging.getLogger(__name__)
 
@@ -109,12 +110,19 @@ def render_chat_interface(sorted_results, ai_api_key):
 # Search Form
 # ---------------------------------------------------------------------------
 
+# A shared link (?q=…) pre-fills the query and runs the search once.
+_url_query = st.query_params.get("q", "")
+if "query_text" not in st.session_state:
+    st.session_state["query_text"] = _url_query
+auto_search = bool(_url_query) and not st.session_state.get("auto_searched")
+st.session_state["auto_searched"] = True
+
 with st.form("search_form"):
-    query = st.text_area("Enter your search query:", max_chars=8192, height=128, help="Describe what you’re looking for. Semantic search performs best with full sentences or descriptive paragraphs. Avoid using isolated keywords; instead, try pasting an abstract or a detailed question to get the most relevant results.", placeholder="e.g. Structural insight into antibody-mediated neutralization of measles virus by a potent monoclonal antibody")
+    query = st.text_area("Enter your search query:", key="query_text", max_chars=8192, height=128, help="Describe what you’re looking for. Semantic search performs best with full sentences or descriptive paragraphs. Avoid using isolated keywords; instead, try pasting an abstract or a detailed question to get the most relevant results.", placeholder="e.g. Structural insight into antibody-mediated neutralization of measles virus by a potent monoclonal antibody")
     col1, col2 = st.columns(2)
     with col1:
         num_to_show = st.number_input(
-            "Number of results:", min_value=1, max_value=100, value=10
+            "Number of results:", min_value=1, max_value=50, value=10
         )
     with col2:
         use_high_quality = st.toggle(
@@ -125,20 +133,19 @@ with st.form("search_form"):
 
     if st.session_state.get("date_filter_toggle", False):
         col_d1, col_d2 = st.columns(2)
-        start_raw = col_d1.text_input("Start Date", value="2020-01-01", placeholder="YYYY-MM-DD")
-        end_raw   = col_d2.text_input("End Date",   value=datetime.today().strftime("%Y-%m-%d"), placeholder="YYYY-MM-DD")
-        try:
-            datetime.strptime(start_raw, "%Y-%m-%d")
-            datetime.strptime(end_raw,   "%Y-%m-%d")
-            start_date_str, end_date_str = start_raw, end_raw
-        except ValueError:
-            st.warning("Dates must be in YYYY-MM-DD format (e.g. 2020-01-01).")
-            start_date_str = end_date_str = None
+        start_d = col_d1.date_input("From", value=date(2020, 1, 1), min_value=date(1800, 1, 1),
+                                    max_value=date.today(), format="YYYY-MM-DD")
+        end_d = col_d2.date_input("To", value=date.today(), min_value=date(1800, 1, 1),
+                                  max_value=date.today(), format="YYYY-MM-DD")
+        if start_d and end_d and start_d > end_d:
+            start_d, end_d = end_d, start_d
+        start_date_str = start_d.isoformat() if start_d else None
+        end_date_str = end_d.isoformat() if end_d else None
     else:
         start_date_str = None
         end_date_str = None
 
-    submitted = st.form_submit_button("Search :material/search:", type="primary")
+    submitted = st.form_submit_button("Search :material/search:", type="primary") or auto_search
 
 # --- Toggles outside form ---
 col_t1, col_t2 = st.columns(2)
@@ -169,7 +176,12 @@ if submitted and query:
     st.session_state["citations"] = None
     st.session_state["doi_list"] = None
     st.session_state["clean_doi"] = None
-    st.session_state["full_text_links"] = None
+
+    # Shareable URL for this search (long pasted abstracts are left out of the URL)
+    if len(query) <= 2000:
+        st.query_params["q"] = query
+    else:
+        st.query_params.pop("q", None)
 
     if len(query) > 2000:
         st.info(
@@ -242,19 +254,12 @@ if not final_results.empty:
         st.session_state["doi_list"] = all_doi
         st.session_state["citations"] = None
         st.session_state["clean_doi"] = None
-        st.session_state["full_text_links"] = None
 
     # Clean DOIs (fast, no network)
     if st.session_state.get("clean_doi") is None:
         st.session_state["clean_doi"] = [utils.get_clean_doi(d) for d in all_doi]
     sorted_results["doi"] = st.session_state["clean_doi"]
-
-    # Full-text links (fast, no network)
-    if st.session_state.get("full_text_links") is None:
-        sorted_results = utils.precalculate_full_text_links_parallel(sorted_results)
-        st.session_state["full_text_links"] = sorted_results["full_text_link"].tolist()
-    else:
-        sorted_results["full_text_link"] = st.session_state["full_text_links"]
+    sorted_results["rank"] = range(1, len(sorted_results) + 1)   # relevance rank
 
     # Citations — use cached value or placeholder while fetching
     citations_ready = st.session_state.get("citations") is not None
@@ -272,9 +277,10 @@ if not final_results.empty:
     else:
         sorted_results = sorted_results.sort_values("score", ascending=False).reset_index(drop=True)
 
-    full_text_link_n = sorted_results["full_text_link"].notnull().sum()
+    by_source = sorted_results["source"].value_counts()
     col_a.markdown(
-        f"#### Search results\n:material/import_contacts: {full_text_link_n} full-text available"
+        f"#### {len(sorted_results)} results\n"
+        + " · ".join(f"{name} {count}" for name, count in by_source.items())
     )
 
     # --- Tabs ---
@@ -284,25 +290,21 @@ if not final_results.empty:
         for idx, row in sorted_results.iterrows():
             citations = row["citations"]
             citation_str = f"{citations:,}" if citations is not None else "…"
-            doi_link = (
-                f"https://doi.org/{row['doi']}"
-                if "arxiv.org" not in str(row["doi"])
-                else row["doi"]
-            )
-            full_text_link = row.get("full_text_link")
-            final_link = full_text_link if full_text_link is not None else doi_link
-            ft_icon = ":material/import_contacts:" if full_text_link else ""
+            badges = paper_links.badges(row)
+            retracted = paper_links.is_retracted(row)
 
+            meta_parts = [str(row["date"] or "n.d."), row["source"], f"cited {citation_str}"]
+            meta_parts += [b for b in badges if b != "Retracted"]
             expander_title = (
-                f"{idx + 1}\\. {row['title']}\n\n"
-                f"_(Score: {row['score']:.2f} | Date: {row['date']} | Citations: {citation_str})_"
+                f"{idx + 1}\\. {'⚠️ RETRACTED — ' if retracted else ''}{row['title']}\n\n"
+                f"_{' · '.join(meta_parts)}_"
             )
-            if ft_icon:
-                expander_title += f" | {ft_icon}"
 
             with st.expander(expander_title):
+                if retracted:
+                    st.error("This article has been retracted.", icon=":material/report:")
                 c_a, c_b, c_c = st.columns(3)
-                c_a.metric("Score", f"{row['score']:.3f}")
+                c_a.metric("Relevance rank", f"#{row['rank']}", help=f"Similarity {row['score']:.3f}")
                 c_b.metric("Source", row["source"])
                 c_c.metric("Citations", citation_str)
                 st.markdown(f"**Authors:** {row['authors']}")
@@ -311,10 +313,9 @@ if not final_results.empty:
                 c_e.markdown(f"**Journal/Server:** {row.get('journal', 'N/A')}")
                 st.markdown(f"**Abstract:**\n{row['abstract']}")
 
-                link_cols = st.columns(3)
-                if full_text_link:
-                    link_cols[0].markdown(f"**[:material/import_contacts: Full Text]({final_link})**")
-                link_cols[1].markdown(f"**[:material/link: Publisher Site]({doi_link})**")
+                links = paper_links.build_links(row)
+                if links:
+                    st.markdown(" · ".join(f"**[{label}]({url})**" for label, url in links))
 
         st.markdown("---")
         fig_scatter = ui_components.plot_score_vs_year(sorted_results)
@@ -323,15 +324,27 @@ if not final_results.empty:
     with tabs[1]:
         st.markdown("### Export Bibliography")
         bibtex_str = ui_components.generate_bibtex(sorted_results)
-        col_ex1, col_ex2 = st.columns([1, 2])
-        with col_ex1:
-            st.download_button(
-                label="Download .bib file",
-                data=bibtex_str,
-                file_name=f"mss_search_{datetime.now().strftime('%Y%m%d_%H%M')}.bib",
-                mime="text/x-bibtex",
-                type="primary",
-            )
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        col_ex1, col_ex2, col_ex3 = st.columns(3)
+        col_ex1.download_button(
+            label="BibTeX (.bib)",
+            data=bibtex_str,
+            file_name=f"mss_search_{stamp}.bib",
+            mime="text/x-bibtex",
+            type="primary",
+        )
+        col_ex2.download_button(
+            label="RIS (Zotero, EndNote)",
+            data=ui_components.generate_ris(sorted_results),
+            file_name=f"mss_search_{stamp}.ris",
+            mime="application/x-research-info-systems",
+        )
+        col_ex3.download_button(
+            label="CSV",
+            data=ui_components.results_csv(sorted_results),
+            file_name=f"mss_search_{stamp}.csv",
+            mime="text/csv",
+        )
         with st.expander("Preview BibTeX"):
             st.code(bibtex_str, language="latex")
 

@@ -753,6 +753,64 @@ class ChunkedSearcher:
 
 
 # ---------------------------------------------------------------------------
+# Result rows + dedup
+# ---------------------------------------------------------------------------
+
+RESULT_COLUMNS = [
+    "doi", "title", "authors", "date", "abstract", "score", "source", "journal",
+    "pmid", "pub_type", "published_doi", "version",
+]
+
+
+def _norm_doi(value) -> str:
+    doi = str(value or "").strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.startswith(prefix):
+            doi = doi[len(prefix):]
+    return doi if len(doi) > 5 and doi not in ("none", "nan") else ""
+
+
+def _is_preprint(row: dict) -> bool:
+    return _norm_doi(row.get("doi")).startswith("10.1101/") or row.get("source") in ("BioRxiv", "MedRxiv")
+
+
+def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
+    """
+    Appends row to rows unless it duplicates one already kept (same DOI, or same
+    title when it has no DOI). A preprint and its journal version count as
+    duplicates: the published version is kept in the better-ranked slot and the
+    preprint DOI is recorded on it as preprint_doi. Returns True if appended.
+    """
+    doi = _norm_doi(row.get("doi"))
+    published = _norm_doi(row.get("published_doi"))
+    title = str(row.get("title") or "").strip().lower()
+    ids = [i for i in (doi, published) if i]
+
+    existing = next((seen[i] for i in ids if i in seen), None)
+    if existing is None and not doi and title in seen:
+        existing = seen[title]
+
+    if existing is not None:
+        kept = rows[existing]
+        if _is_preprint(kept) and not _is_preprint(row) and doi and doi == _norm_doi(kept.get("published_doi")):
+            # Kept a preprint whose published version just showed up: swap them,
+            # keeping the preprint's (higher) score so the slot's rank is unchanged.
+            merged = dict(row, score=kept["score"], preprint_doi=kept.get("doi"))
+            rows[existing] = merged
+            for i in (doi, title):
+                if i:
+                    seen[i] = existing
+        elif _is_preprint(row) and published and published == _norm_doi(kept.get("doi")):
+            kept.setdefault("preprint_doi", row.get("doi"))
+        return False
+
+    rows.append(row)
+    for i in ids + ([title] if title else []):
+        seen.setdefault(i, len(rows) - 1)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Search orchestrator
 # ---------------------------------------------------------------------------
 
@@ -808,7 +866,7 @@ def combined_search_orchestrator(
     all_global_candidates.sort(key=lambda x: x["score"], reverse=True)
 
     final_valid_rows = []
-    seen_identifiers: set = set()
+    seen_identifiers: dict = {}   # identifier (DOI / title) -> index in final_valid_rows
 
     # --- 3. Batched fetch + filter + live dedup ---
     batch_size = max(50, top_k)
@@ -850,7 +908,17 @@ def combined_search_orchestrator(
                     elif "posted" in df_subset.columns:
                         df_subset["date"] = df_subset["posted"]
 
-                required_cols = ["doi", "title", "authors", "date", "abstract", "score", "source", "journal"]
+                # PubMed publication types (Review, Retracted Publication, …).
+                # bioRxiv/medRxiv also have a "type" column, but it means something else.
+                if source_name == "PubMed" and "type" in df_subset.columns:
+                    df_subset["pub_type"] = df_subset["type"]
+
+                # Preprints: DOI of the journal version, "NA" when unpublished.
+                if "published" in df_subset.columns:
+                    published = df_subset["published"].astype(str).str.strip()
+                    df_subset["published_doi"] = published.where(published.str.startswith("10."), None)
+
+                required_cols = RESULT_COLUMNS
                 for col in required_cols:
                     if col not in df_subset.columns:
                         df_subset[col] = None
@@ -883,23 +951,11 @@ def combined_search_orchestrator(
             qual_mask = combined_batch_df["abstract"].str.len() > 75
             combined_batch_df = combined_batch_df[qual_mask.fillna(False)]
 
-        # Live dedup — pre-extract columns to avoid per-row Series allocation
-        dois   = combined_batch_df["doi"].fillna("").astype(str).str.strip().tolist()
-        titles = combined_batch_df["title"].fillna("").astype(str).str.strip().str.lower().tolist()
-        rows_list = combined_batch_df.to_dict("records")
-
-        for doi, title, row in zip(dois, titles, rows_list):
+        # Live dedup (also merges a preprint with its published version)
+        for row in combined_batch_df.to_dict("records"):
             if len(final_valid_rows) >= top_k:
                 break
-            if doi and len(doi) > 5 and doi in seen_identifiers:
-                continue
-            if (not doi or len(doi) < 5) and title in seen_identifiers:
-                continue
-            if doi and len(doi) > 5:
-                seen_identifiers.add(doi)
-            if title:
-                seen_identifiers.add(title)
-            final_valid_rows.append(row)
+            _add_or_merge(final_valid_rows, seen_identifiers, row)
 
     if not final_valid_rows:
         return pd.DataFrame()

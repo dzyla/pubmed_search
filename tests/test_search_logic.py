@@ -108,3 +108,49 @@ def test_metadata_written_atomically(corpus):
     assert leftovers == []
     with open(config["metadata_path"]) as f:
         assert json.load(f)["total_rows"] == N_FILES * ROWS_PER_FILE
+
+
+# ---------------------------------------------------------------------------
+# Dedup / preprint ↔ published merge
+# ---------------------------------------------------------------------------
+
+def _row(doi, score, source="PubMed", published_doi=None, title=None):
+    return {"doi": doi, "score": score, "source": source,
+            "published_doi": published_doi, "title": title or f"title {doi}"}
+
+
+def _dedup(rows):
+    kept, seen = [], {}
+    for r in rows:
+        search_logic._add_or_merge(kept, seen, r)
+    return kept
+
+
+def test_preprint_ranked_first_is_replaced_by_published_version():
+    kept = _dedup([
+        _row("10.1101/2020.01.01.1", 0.90, "BioRxiv", published_doi="10.1038/abc"),
+        _row("10.5555/other", 0.85),
+        _row("10.1038/ABC", 0.80),
+    ])
+    assert [r["doi"] for r in kept] == ["10.1038/ABC", "10.5555/other"]
+    assert kept[0]["score"] == 0.90
+    assert kept[0]["preprint_doi"] == "10.1101/2020.01.01.1"
+
+
+def test_preprint_after_published_version_is_folded_in():
+    kept = _dedup([
+        _row("10.1038/abc", 0.90),
+        _row("10.1101/2020.01.01.1", 0.80, "BioRxiv", published_doi="10.1038/abc"),
+    ])
+    assert len(kept) == 1
+    assert kept[0]["preprint_doi"] == "10.1101/2020.01.01.1"
+
+
+def test_same_doi_and_doi_less_title_duplicates_are_dropped():
+    kept = _dedup([
+        _row("10.1/a", 0.9, title="Same Title"),
+        _row("10.1/A", 0.8),                           # same DOI, different case
+        _row("", 0.7, title="same title"),            # no DOI, title already seen
+        _row("10.1/b", 0.6, title="Same Title"),      # has its own DOI → kept
+    ])
+    assert [r["doi"] for r in kept] == ["10.1/a", "10.1/b"]
