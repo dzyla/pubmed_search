@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import torch
 import uvicorn
@@ -13,6 +15,9 @@ from sentence_transformers import SentenceTransformer
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+LOGGER = logging.getLogger(__name__)
+
 # -----------------------------------------------------------------------------
 # GLOBAL STATE
 # -----------------------------------------------------------------------------
@@ -22,7 +27,7 @@ model_context = {}
 async def lifespan(app: FastAPI):
     # --- Startup ---
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading {MODEL_ID} on {device}...")
+    LOGGER.info(f"Loading {MODEL_ID} on {device}…")
     
     try:
         model = SentenceTransformer(
@@ -34,20 +39,12 @@ async def lifespan(app: FastAPI):
                 "attn_implementation": "sdpa" if torch.cuda.is_available() else "eager"
             }
         )
-        
-        # Optional: Compile for Blackwell/H100 GPUs (Linux only)
-        if device == "cuda":
-            try:
-                # model = torch.compile(model) # Uncomment for extra speed on production
-                pass
-            except:
-                pass
-                
+
         model_context["model"] = model
-        print("✅ Model ready.")
-        
+        LOGGER.info("Model ready.")
+
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
+        LOGGER.error(f"Error loading model: {e}")
         
     yield
     

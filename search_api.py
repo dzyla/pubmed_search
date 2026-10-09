@@ -18,7 +18,6 @@ import time
 import asyncio
 import logging
 import secrets
-import yaml
 import requests
 from contextlib import asynccontextmanager
 from datetime import date
@@ -33,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Ensure local modules are importable when run from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from config_loader import read_source_configs
 from search_logic import combined_search_orchestrator, trigger_database_updates, warm_up_indexes
 from utils import get_clean_doi
 from api_handler import get_query_embedding_packed, EmbeddingError
@@ -83,14 +83,7 @@ VALID_KEYS: set = _load_api_keys(API_KEYS_FILE)
 # ---------------------------------------------------------------------------
 def _load_configs(yaml_path: str):
     try:
-        with open(yaml_path) as f:
-            data = yaml.safe_load(f)
-        configs = [
-            data.get("pubmed_config",  {}),
-            data.get("biorxiv_config", {}),
-            data.get("medrxiv_config", {}),
-            data.get("arxiv_config",   {}),
-        ]
+        configs = list(read_source_configs(yaml_path).values())
         LOGGER.info(f"Loaded search configs from {yaml_path}")
         return configs
     except FileNotFoundError:
@@ -314,7 +307,7 @@ async def search(req: SearchRequest):
             req.end_date.isoformat() if req.end_date else None,
             req.high_quality_only,
         )
-    except Exception as exc:
+    except Exception:
         LOGGER.exception("Search failed")
         raise HTTPException(status_code=500, detail="Search failed. Please try again later.")
 

@@ -3,11 +3,8 @@ import time
 import uuid
 import sqlite3
 import logging
-import re
-import requests
 import pandas as pd
 import streamlit as st
-import concurrent.futures
 from contextlib import contextmanager
 import doi
 from crossref.restful import Works, Etiquette
@@ -127,27 +124,9 @@ def get_citation_count(doi_str):
     return count
 
 
-def get_full_text_link(row):
-    source = str(row.get("source", "None")).lower()
-    if source == "pubmed":
-        doi_val = row.get("doi")
-        if doi_val and "10." in str(doi_val):
-            return f"https://doi.org/{doi_val}"
-        return None
-    else:
-        doi_val = row.get("doi")
-        if doi_val:
-            if "arxiv.org" in str(doi_val):
-                return doi_val
-            else:
-                return f"https://doi.org/{doi_val}"
-        return None
-
-
 def precalculate_full_text_links_parallel(df):
     """
     Computes full-text links for each result row using vectorised string ops.
-    No thread pool — get_full_text_link is pure string logic with zero I/O.
     """
     if df.empty:
         df["full_text_link"] = None
