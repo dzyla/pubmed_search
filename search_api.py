@@ -189,6 +189,8 @@ class Paper(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    query_bits: Optional[str] = Field(default=None, description=(
+        "The query's 384-bit binary code as hex — what the index matches against."))
     total_results: int
     search_time_seconds: float
     results: List[Paper]
@@ -261,7 +263,7 @@ async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = No
     elapsed = round(time.perf_counter() - t0, 2)
     LOGGER.info(f"Search ({len(query)} chars, top_k={top_k}) → {len(results_df)} results in {elapsed}s")
     papers = [_to_paper(row) for _, row in results_df.iterrows()]
-    return SearchResponse(query=query, total_results=len(papers),
+    return SearchResponse(query=query, query_bits=packed.tobytes().hex(), total_results=len(papers),
                           search_time_seconds=elapsed, results=papers).model_dump()
 
 

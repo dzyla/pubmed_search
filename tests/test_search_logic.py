@@ -231,3 +231,20 @@ def test_rare_date_range_uses_few_rounds(corpus, monkeypatch):
     assert len(df) == 10 and (pd.to_datetime(df["date"]) >= "2015-01-01").all()
     date_only = [c for c in calls if c == search_logic._DATE_COLUMNS]
     assert date_only and len(calls) <= 6
+
+
+def test_preprint_without_published_doi_merges_by_title():
+    title = "Structural and Mechanistic Basis for Antibody Neutralization of the Measles Fusion Protein"
+    kept = _dedup([
+        _row("10.1101/2025.09.16.1", 0.90, "BioRxiv", published_doi=None, title=title),
+        _row("10.5555/other", 0.85),
+        _row("10.1038/s41467-026-1", 0.80, title=title.lower() + "."),
+    ])
+    assert [r["doi"] for r in kept] == ["10.1038/s41467-026-1", "10.5555/other"]
+    assert kept[0]["preprint_doi"] == "10.1101/2025.09.16.1"
+
+
+def test_two_journal_articles_with_same_title_stay_separate():
+    title = "A long enough title that two different journal articles share by chance"
+    kept = _dedup([_row("10.1/a", 0.9, title=title), _row("10.1/b", 0.8, title=title)])
+    assert len(kept) == 2
