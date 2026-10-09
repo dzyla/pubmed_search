@@ -80,3 +80,45 @@ class AuxIndex:
         if b - a > MAX_POSTINGS_PER_TOKEN:
             return None
         return np.asarray(self._stem[a:b]), np.asarray(self._row[a:b])
+
+
+class PmcIndex:
+    """PMID -> PMCID for free full text (built by update_database/pmc_links_update.py)."""
+
+    def __init__(self, root: str):
+        self.dir = os.path.join(root, "PMC")
+        self.version = None
+        self._pmid = self._pmcid = None
+
+    def refresh(self) -> bool:
+        versions = sorted(os.path.dirname(p) for p in glob.glob(os.path.join(self.dir, "*", "zzz_complete.json")))
+        if not versions or versions[-1] == self.version:
+            return False
+        path = versions[-1]
+        try:
+            self._pmid = np.load(os.path.join(path, "pmid.npy"), mmap_mode="r")
+            self._pmcid = np.load(os.path.join(path, "pmcid.npy"), mmap_mode="r")
+        except Exception as exc:
+            LOGGER.error(f"Could not load PMC index {path}: {exc}")
+            return False
+        previous, self.version = self.version, path
+        LOGGER.info(f"PMC full-text index loaded: {path} ({len(self._pmid):,} articles)")
+        for old in versions[:-2]:
+            if old != previous:
+                shutil.rmtree(old, ignore_errors=True)
+        return True
+
+    def lookup(self, pmids) -> list:
+        """PMCID strings ('PMC123') or None, aligned with pmids."""
+        if self._pmid is None:
+            return [None] * len(pmids)
+        out = []
+        for p in pmids:
+            try:
+                p = int(p)
+            except (TypeError, ValueError):
+                out.append(None)
+                continue
+            i = int(np.searchsorted(self._pmid, p))
+            out.append(f"PMC{int(self._pmcid[i])}" if i < len(self._pmid) and self._pmid[i] == p else None)
+        return out

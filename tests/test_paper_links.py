@@ -56,3 +56,11 @@ def test_other_preprints_and_new_biorxiv_prefix():
     assert pl.badges(row) == ["Published"]
     new = {"source": "BioRxiv", "doi": "10.64898/2026.01.02.123456", "version": "1"}
     assert dict(pl.build_links(new))["PDF"].startswith("https://www.biorxiv.org/content/10.64898/")
+
+
+def test_free_full_text_link_and_label():
+    row = {"source": "PubMed", "doi": "10.1/x", "pmid": "123", "pmcid": "PMC456"}
+    assert pl.build_links(row)[:3] == [("DOI", "https://doi.org/10.1/x"),
+                                       ("Free full text", "https://pmc.ncbi.nlm.nih.gov/articles/PMC456/"),
+                                       ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/123/")]
+    assert "Free full text" in pl.badges(row)

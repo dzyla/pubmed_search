@@ -65,6 +65,10 @@ def build_links(row) -> list:
     elif doi:
         links.append(("DOI", f"https://doi.org/{doi}"))
 
+    pmcid = _clean(row.get("pmcid"))
+    if pmcid.startswith("PMC"):
+        links.append(("Free full text", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"))
+
     pmid = _clean(row.get("pmid"))
     if pmid.isdigit():
         links.append(("PubMed", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
@@ -116,6 +120,8 @@ def badges(row) -> list:
                       else "Preprint")
     if _clean(row.get("preprint_doi")):
         labels.append("Has preprint")
+    if _clean(row.get("pmcid")).startswith("PMC"):
+        labels.append("Free full text")
     # "Review" is redundant next to "Systematic review"
     if "Systematic review" in labels and "Review" in labels:
         labels.remove("Review")

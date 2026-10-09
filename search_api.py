@@ -230,6 +230,7 @@ class Paper(BaseModel):
     matched_terms: List[str] = Field(default_factory=list, description=(
         "Identifiers from the query (gene symbols, variants, compound or trial ids) found in this "
         "document, normalized to lower case without hyphens."))
+    pmcid: Optional[str] = Field(default=None, description="PubMed Central id when free full text is available.")
     registry_id: Optional[str] = Field(default=None, description=(
         "ClinicalTrials.gov NCT id for trials, NIH core project number for grants."))
     ref: Optional[str] = Field(default=None, description=(
@@ -280,6 +281,7 @@ def _to_paper(row) -> Paper:
         published_doi=_optional_str(row.get("published_doi")),
         preprint_doi=_optional_str(row.get("preprint_doi")),
         matched_terms=list(row.get("matched_terms")) if isinstance(row.get("matched_terms"), (list, tuple, np.ndarray)) else [],
+        pmcid=_optional_str(row.get("pmcid")),
         registry_id=_optional_str(row.get("nct_id")) or _optional_str(row.get("grant_id")),
         ref=_ref(row),
     )
