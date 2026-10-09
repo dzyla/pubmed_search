@@ -826,6 +826,7 @@ RESULT_COLUMNS = [
     "pmid", "pub_type", "published_doi", "version",
     # ClinicalTrials.gov
     "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
+    "corpus_id",   # global row id; within PubMed, a larger id = a newer record version
 ]
 
 
@@ -847,6 +848,13 @@ def _is_preprint(row: dict) -> bool:
     return _norm_doi(row.get("doi")).startswith("10.1101/") or row.get("source") in ("BioRxiv", "MedRxiv")
 
 
+def _newer_version(row: dict, kept: dict) -> bool:
+    try:
+        return row.get("source") == kept.get("source") and int(row["corpus_id"]) > int(kept["corpus_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
     """
     Appends row to rows unless it duplicates one already kept (same DOI, or same
@@ -861,7 +869,9 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
     published = _norm_doi(row.get("published_doi"))
     title = str(row.get("title") or "").strip().lower()
     title_key = _title_key(title)
-    ids = [i for i in (doi, published) if i]
+    pmid = str(row.get("pmid") or "").strip()
+    pmid_key = f"pmid:{pmid}" if pmid.isdigit() else ""
+    ids = [i for i in (doi, published, pmid_key) if i]
 
     existing = next((seen[i] for i in ids if i in seen), None)
     if existing is None and not doi and title in seen:
@@ -874,6 +884,13 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
 
     if existing is not None:
         kept = rows[existing]
+        if pmid_key and pmid_key in seen and seen[pmid_key] == existing \
+                and _newer_version(row, kept):
+            # PubMed update files re-issue revised records under the same PMID
+            # (e.g. after a retraction). Show the newest version in this slot.
+            rows[existing] = dict(row, score=kept["score"],
+                                  preprint_doi=kept.get("preprint_doi", row.get("preprint_doi")))
+            return False
         if _is_preprint(kept) and not _is_preprint(row) and (
                 same_work_by_title or (doi and doi == _norm_doi(kept.get("published_doi")))):
             # Kept a preprint whose published version just showed up: swap them,
