@@ -55,7 +55,7 @@ import numpy as np
 import access
 import embedder
 import paper_links
-from config_loader import read_source_configs
+from config_loader import DEFAULT_SOURCES, read_source_configs
 from mcp_server import SOURCES, SearchFailed, build_mcp
 import pandas as pd
 from search_logic import (
@@ -161,16 +161,14 @@ CONFIGS = _load_configs(CONFIG_PATH)
 
 def _configs_for(sources: Optional[List[str]]) -> list:
     """Source configs in search_logic order, with unselected sources blanked out."""
-    if not sources:
-        return CONFIGS
-    wanted = {s.lower() for s in sources}
+    wanted = {s.lower() for s in (sources or DEFAULT_SOURCES)}
     return [cfg if name.lower() in wanted else {} for name, cfg in zip(SOURCES, CONFIGS)]
 
 
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
-SourceName = Literal["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials"]
+SourceName = Literal["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants"]
 
 
 class SearchRequest(BaseModel):
@@ -186,7 +184,7 @@ class SearchRequest(BaseModel):
     high_quality_only: bool = Field(default=True, description=(
         "Exclude papers with very short or missing abstracts."))
     sources: Optional[List[SourceName]] = Field(default=None, description=(
-        "Restrict to these databases; all if omitted."))
+        "Restrict to these databases; all except Grants if omitted."))
 
     model_config = {"json_schema_extra": {"example": {
         "query": "CRISPR base editing off-target effects",
@@ -220,7 +218,7 @@ class Paper(BaseModel):
     date: Optional[str] = Field(default=None, description="Publication or posting date (YYYY-MM-DD).")
     year: Optional[int]
     score: float = Field(description="Relevance score between 0.0 (no match) and 1.0 (perfect match).")
-    source: str = Field(description="Database: PubMed | BioRxiv | MedRxiv | arXiv | ClinicalTrials.")
+    source: str = Field(description="Database: PubMed | BioRxiv | MedRxiv | arXiv | ClinicalTrials | Preprints | Grants.")
     url: Optional[str] = Field(default=None, description="Best link to the paper (DOI, arXiv or PubMed).")
     links: List[Link] = Field(default_factory=list, description="All links: DOI, PubMed, PDF, published version, preprint.")
     pmid: Optional[str] = Field(default=None, description="PubMed ID, when available.")
@@ -232,6 +230,8 @@ class Paper(BaseModel):
     matched_terms: List[str] = Field(default_factory=list, description=(
         "Identifiers from the query (gene symbols, variants, compound or trial ids) found in this "
         "document, normalized to lower case without hyphens."))
+    registry_id: Optional[str] = Field(default=None, description=(
+        "ClinicalTrials.gov NCT id for trials, NIH core project number for grants."))
     ref: Optional[str] = Field(default=None, description=(
         "Stable reference for /v1/similar and the find_similar MCP tool, e.g. 'PubMed:123456'."))
 
@@ -280,6 +280,7 @@ def _to_paper(row) -> Paper:
         published_doi=_optional_str(row.get("published_doi")),
         preprint_doi=_optional_str(row.get("preprint_doi")),
         matched_terms=list(row.get("matched_terms")) if isinstance(row.get("matched_terms"), (list, tuple, np.ndarray)) else [],
+        registry_id=_optional_str(row.get("nct_id")) or _optional_str(row.get("grant_id")),
         ref=_ref(row),
     )
 

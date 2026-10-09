@@ -40,3 +40,19 @@ def test_nan_values_are_ignored():
     assert pl.build_links(row) == []
     assert pl.badges(row) == []
     assert pl.year_of({"date": "2021-05-01"}) == 2021
+
+
+def test_grant_links_and_labels():
+    row = {"source": "Grants", "grant_id": "UM1HL172720", "appl_id": "11251654", "ic": "HL",
+           "activity_code": "UM1", "doi": ""}
+    assert pl.build_links(row) == [("NIH RePORTER", "https://reporter.nih.gov/project-details/11251654")]
+    assert pl.badges(row) == ["UM1", "HL"]
+
+
+def test_other_preprints_and_new_biorxiv_prefix():
+    row = {"source": "Preprints", "doi": "10.21203/rs.3.rs-123/v1", "published_pmid": "41234567",
+           "published_doi": ""}
+    assert ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/41234567/") in pl.build_links(row)
+    assert pl.badges(row) == ["Published"]
+    new = {"source": "BioRxiv", "doi": "10.64898/2026.01.02.123456", "version": "1"}
+    assert dict(pl.build_links(new))["PDF"].startswith("https://www.biorxiv.org/content/10.64898/")

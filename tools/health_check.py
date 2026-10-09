@@ -43,7 +43,8 @@ LOCAL_DATA = "/mnt/h"
 MAX_AGE_DAYS = {"PubMed": 4, "BioRxiv": 4, "MedRxiv": 4, "arXiv": 10, "ClinicalTrials": 10,
                 "Preprints": 10, "Grants": 10}
 LOGS = ["~/pubmed.log", "~/biorxiv.log", "~/arxiv_oai.log", "~/clinicaltrials.log",
-        "~/bmss_sync.log", "~/rsync.log", "~/nas_backup.log"]
+        "~/bmss_sync.log", "~/rsync.log", "~/nas_backup.log", "~/aux_index_build.log",
+        "~/preprints.log", "~/grants.log"]
 ERROR_PATTERNS = ("Traceback", "CRITICAL", "No space left", "Input/output error", "FAILED",
                   "kept failing", "rsync error", "Errno", "DONE with errors")
 

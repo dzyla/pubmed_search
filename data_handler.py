@@ -27,6 +27,8 @@ _WISHLIST = frozenset({
     "journal", "server", "journal-ref", "published", "posted", "update_date",
     "pmid", "type", "version",
     "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
+    "published_pmid", "license",
+    "grant_id", "appl_id", "ic", "activity_code", "organization", "fiscal_year",
 })
 
 

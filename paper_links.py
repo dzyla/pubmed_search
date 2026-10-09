@@ -5,6 +5,7 @@ Pure string logic on a result row (dict or pandas Series) — no network.
 import re
 
 _PREPRINT_SERVERS = {"BioRxiv": "biorxiv", "MedRxiv": "medrxiv"}
+_PREPRINT_DOI_PREFIXES = ("10.1101/", "10.64898/")
 # Trial statuses worth a label (others, e.g. "Unknown", are left out).
 _TRIAL_STATUS_LABELS = {"Recruiting", "Not yet recruiting", "Active, not recruiting",
                         "Enrolling by invitation", "Completed", "Terminated", "Withdrawn", "Suspended"}
@@ -44,6 +45,13 @@ def build_links(row) -> list:
     doi = _clean(row.get("doi"))
     source = _clean(row.get("source"))
 
+    grant = _clean(row.get("grant_id"))
+    if grant:
+        appl = _clean(row.get("appl_id")).split(".")[0]
+        url = (f"https://reporter.nih.gov/project-details/{appl}" if appl.isdigit()
+               else f"https://reporter.nih.gov/search/results?query={grant}")
+        return [("NIH RePORTER", url)]
+
     nct = _clean(row.get("nct_id"))
     if nct:
         links.append(("ClinicalTrials.gov", f"https://clinicaltrials.gov/study/{nct}"))
@@ -62,7 +70,7 @@ def build_links(row) -> list:
         links.append(("PubMed", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
 
     server = _PREPRINT_SERVERS.get(source)
-    if server and doi.startswith("10.1101/"):
+    if server and doi.startswith(_PREPRINT_DOI_PREFIXES):
         version = _clean(row.get("version"))
         version = version if version.isdigit() else "1"
         links.append(("PDF", f"https://www.{server}.org/content/{doi}v{version}.full.pdf"))
@@ -70,6 +78,10 @@ def build_links(row) -> list:
     published = _clean(row.get("published_doi"))
     if published:
         links.append(("Published version", f"https://doi.org/{published}"))
+
+    published_pmid = _clean(row.get("published_pmid")).split(".")[0]
+    if published_pmid.isdigit() and not any(label == "PubMed" for label, _ in links):
+        links.append(("PubMed", f"https://pubmed.ncbi.nlm.nih.gov/{published_pmid}/"))
 
     preprint = _clean(row.get("preprint_doi"))
     if preprint:
@@ -85,6 +97,8 @@ def primary_link(row):
 
 def badges(row) -> list:
     """Short labels for notable publication types; 'Retracted' always comes first."""
+    if _clean(row.get("grant_id")):
+        return [x for x in (_clean(row.get("activity_code")), _clean(row.get("ic"))) if x]
     if _clean(row.get("nct_id")):
         labels = [p for p in _clean(row.get("trial_phase")).split("/") if p]
         status = _clean(row.get("trial_status"))
@@ -97,8 +111,9 @@ def badges(row) -> list:
     labels = [label for name, label in _TYPE_BADGES if name in types]
     if is_retracted(row) and "Retracted" not in labels:
         labels.insert(0, "Retracted")
-    if _clean(row.get("source")) in _PREPRINT_SERVERS:
-        labels.append("Published" if _clean(row.get("published_doi")) else "Preprint")
+    if _clean(row.get("source")) in (*_PREPRINT_SERVERS, "Preprints"):
+        labels.append("Published" if _clean(row.get("published_doi")) or _clean(row.get("published_pmid"))
+                      else "Preprint")
     if _clean(row.get("preprint_doi")):
         labels.append("Has preprint")
     # "Review" is redundant next to "Systematic review"

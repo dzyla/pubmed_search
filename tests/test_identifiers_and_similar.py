@@ -19,6 +19,7 @@ def test_identifier_tokens():
     assert not identifier_tokens("the results were significant in 1990s and 2nd trial 2019")
     # ALL-CAPS titles: plain words are not symbols, letter+digit tokens still are
     assert identifier_tokens("EFFECT OF P53 ON THE LIVER") == {"p53"}
+    assert {"tmem175", "tmem175mediated"} <= identifier_tokens("a TMEM175-mediated current")
 
 
 @pytest.fixture

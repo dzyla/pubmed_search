@@ -40,7 +40,14 @@ def identifier_tokens(text: str) -> set:
     # symbol; only letter+digit tokens are trusted there. Text counts as
     # all-caps when it has no ordinary lowercase word.
     allow_caps = re.search(r"\b[a-z]{3,}\b", text) is not None
-    return {normalize(w) for w in _TOKEN.findall(text) if _is_identifier(w, allow_caps)}
+    tokens = set()
+    for word in _TOKEN.findall(text):
+        # "TMEM175-mediated" must also match "TMEM175": index the whole token
+        # and each hyphen-separated part that is an identifier on its own.
+        for cand in ([word] + word.split("-") if "-" in word else [word]):
+            if cand and _is_identifier(cand, allow_caps):
+                tokens.add(normalize(cand))
+    return tokens
 
 
 def token_hash(token: str) -> int:

@@ -1,0 +1,371 @@
+{
+ "europepmc": [
+  {
+   "id": "PPR1336639",
+   "source": "PPR",
+   "doi": "10.21203/rs.3.rs-8044369/v2",
+   "title": "A Security-Oriented Privacy-Preserving Framework for Efficient Medical Record Search in Telemedicine",
+   "authorString": "Xiong L, Wang M, Xie Y, Liu Z, Li Y.",
+   "abstractText": "<title>Abstract</title>  <p>In modern telemedicine and smart healthcare systems, secure retrieval of medical records is essential, as such data are highly sensitive and valuable for clinical decision-making. Existing privacy-preserving query frameworks protect user privacy but often incur high computational costs and limited efficiency when applied to large-scale datasets. This paper presents a lightweight privacy-preserving medical record search framework that integrates symmetric homomorphic encryption with a group-oriented query strategy, achieving both computational efficiency and strong p",
+   "bookOrReportDetails": {
+    "publisher": "Research Square",
+    "yearOfPublication": 2026
+   },
+   "firstPublicationDate": "2026-10-08",
+   "versionNumber": 2,
+   "versionList": {
+    "version": [
+     {
+      "id": "PPR1129403",
+      "source": "PPR",
+      "versionNumber": 1,
+      "firstPublishDate": "2025-12-02",
+      "pubTypeList": {
+       "pubType": [
+        "preprint"
+       ]
+      },
+      "hasEvaluations": "N"
+     },
+     {
+      "id": "PPR1336639",
+      "source": "PPR",
+      "versionNumber": 2,
+      "firstPublishDate": "2026-10-08",
+      "pubTypeList": {
+       "pubType": [
+        "preprint"
+       ]
+      },
+      "hasEvaluations": "N"
+     }
+    ]
+   },
+   "pubTypeList": {
+    "pubType": [
+     "Preprint"
+    ]
+   }
+  },
+  {
+   "id": "PPR1335109",
+   "source": "PPR",
+   "doi": "10.31234/osf.io/dtec6_v2",
+   "title": "A Non-Parametric Approach to Modeling Accelerated Longitudinal Designs",
+   "authorString": "Baral S, Park J, Ferrer E.",
+   "abstractText": "<p>Accelerated longitudinal designs (ALDs) offer an efficient means of studying large developmental periods by combining shorter longitudinal samples across overlapping cohorts. ALDs have been used to study processes that span large developmental epochs, such as cognitive development. However, traditional parametric approaches may impose structural assumptions that limit the accurate reconstruction of individual developmental trajectories. We investigate a nonparametric functional data analytic (FDA) approach for modeling latent trajectories in accelerated longitudinal data. This method allows",
+   "bookOrReportDetails": {
+    "publisher": "PsyArXiv",
+    "yearOfPublication": 2026
+   },
+   "firstPublicationDate": "2026-10-06",
+   "commentCorrectionList": {
+    "commentCorrection": [
+     {
+      "source": "MED",
+      "id": "42154474",
+      "reference": "Multivariate behavioral research. \n    2026 May;:1-2",
+      "type": "Preprint of",
+      "note": "Link created based on a title-first author match",
+      "orderIn": 10001
+     }
+    ]
+   },
+   "pubTypeList": {
+    "pubType": [
+     "Preprint"
+    ]
+   }
+  },
+  {
+   "id": "PPR356990",
+   "source": "PPR",
+   "doi": "10.26434/chemrxiv.14778147.v1",
+   "title": "Uptake, Trapping, and Release of Organometallic Cations in Redox-Active Cationic Hosts",
+   "authorString": "Mansoor IF, Dutton K, Rothschild DA, Remsing RC, Lipke MC.",
+   "abstractText": "The host-guest chemistry of metal-organic nanocages is  typically driven by thermodynamically favorable interactions with their guests,  such that uptake and release of guests can be controlled by switching affinity  on/off. Herein, we achieve this effect by reducing porphyrin-walled cationic  nanoprisms  1a  12+ and  1b  12+ to zwitterionic  states that rapidly uptake organometallic cations Cp*  2 Co  + or Cp  2 Co  + . Cp*  2 Co  + binds strongly (  K a = 1.3 x 10  3 M  −1 )  in the neutral state  1a  0 of host  1a  12+ ,  which has its three porphyrin walls doubly reduced and its six (bipy)",
+   "bookOrReportDetails": {
+    "publisher": "ChemRxiv",
+    "yearOfPublication": 2021
+   },
+   "firstPublicationDate": "2021-06-15",
+   "versionNumber": 1,
+   "versionList": {
+    "version": [
+     {
+      "id": "PPR356990",
+      "source": "PPR",
+      "versionNumber": 1,
+      "firstPublishDate": "2021-06-15",
+      "pubTypeList": {
+       "pubType": [
+        "preprint"
+       ]
+      },
+      "hasEvaluations": "N"
+     }
+    ]
+   },
+   "commentCorrectionList": {
+    "commentCorrection": [
+     {
+      "source": "MED",
+      "id": "34596386",
+      "reference": "Journal of the American Chemical Society. 2021 Oct;143(41):16993-17003",
+      "type": "Preprint of",
+      "note": "CrossRef Pre-print loader",
+      "orderIn": 10001
+     }
+    ]
+   },
+   "pubTypeList": {
+    "pubType": [
+     "Preprint"
+    ]
+   }
+  }
+ ],
+ "crossref": [
+  {
+   "DOI": "10.26434/chemrxiv.5318188.v2",
+   "title": [
+    "10-step Synthesis of 20-nor-Salvinorin A by Dynamic Strategic Bond Analysis"
+   ],
+   "abstract": "<jats:p>\n                  Salvinorin\n A (SalA) is a plant metabolite that agonizes the human\n                  <jats:italic toggle=\"yes\">kappa</jats:italic>\n                  -opioid\n receptor (κ-OR) with high affinity and high selectivity over\n                  <jats:italic toggle=\"yes\">mu-</jats:italic>\n                  and\n                  <jats:italic toggle=\"yes\">delta-</jats:italic>\n                  opioid\n receptors. Its therapeutic potential has stimulated extensive semi-synthetic\n studies and total synthesis campaigns. However, structural modification of SalA\n has been complicated by its instability, and efficient total synthesis has been\n frustrated by its dense, complex archit</jats:p>",
+   "author": [
+    {
+     "given": "Jeremy",
+     "family": "Roach",
+     "sequence": "first",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    },
+    {
+     "given": "Yusuke",
+     "family": "Sasano",
+     "sequence": "additional",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    },
+    {
+     "given": "Cullen",
+     "family": "Schmid",
+     "sequence": "additional",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    }
+   ],
+   "posted": {
+    "date-parts": [
+     [
+      2017,
+      8,
+      19
+     ]
+    ]
+   },
+   "created": {
+    "date-parts": [
+     [
+      2017,
+      8,
+      19
+     ]
+    ],
+    "date-time": "2017-08-19T18:27:16Z",
+    "timestamp": 1503167236000
+   },
+   "license": [
+    {
+     "start": {
+      "date-parts": [
+       [
+        2017,
+        8,
+        19
+       ]
+      ],
+      "date-time": "2017-08-19T00:00:00Z",
+      "timestamp": 1503100800000
+     },
+     "content-version": "unspecified",
+     "delay-in-days": 0,
+     "URL": "https://creativecommons.org/licenses/by-nc-nd/4.0/"
+    }
+   ],
+   "relation": {
+    "is-preprint-of": [
+     {
+      "id-type": "doi",
+      "id": "10.1021/acscentsci.7b00488",
+      "asserted-by": "subject"
+     }
+    ],
+    "has-version": [
+     {
+      "id-type": "doi",
+      "id": "10.26434/chemrxiv.5318188.v1",
+      "asserted-by": "object"
+     }
+    ]
+   },
+   "prefix": "10.26434"
+  },
+  {
+   "DOI": "10.31235/osf.io/xs7qr_v1",
+   "title": [
+    "Testing a Digital Inequality Model for Online Political Participation"
+   ],
+   "abstract": "<p>Increasing Internet use is changing the way individuals take part in society but research on the mobilizing effects of the Internet for political participation shows mixed results. The present study takes a digital inequality perspective and analyzes the role of political interest and Internet expertise for the social structuration of online political participation. Analyses are based on two-wave nationally representative survey data from Switzerland and use cluster analysis and structural equation modeling. A distinct group of political users emerged characterized by high education and income. Further, online politi-cal participation is predicted by political interest and Internet skills</jats:p>",
+   "author": [
+    {
+     "ORCID": "https://orcid.org/0000-0002-9202-889X",
+     "authenticated-orcid": true,
+     "given": "Moritz",
+     "family": "Büchi",
+     "sequence": "first",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    },
+    {
+     "given": "Florian",
+     "family": "Vogler",
+     "sequence": "additional",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    }
+   ],
+   "posted": {
+    "date-parts": [
+     [
+      2017,
+      6,
+      22
+     ]
+    ]
+   },
+   "created": {
+    "date-parts": [
+     [
+      2025,
+      4,
+      22
+     ]
+    ],
+    "date-time": "2025-04-22T23:42:19Z",
+    "timestamp": 1745365339000
+   },
+   "license": [
+    {
+     "start": {
+      "date-parts": [
+       [
+        2017,
+        6,
+        22
+       ]
+      ],
+      "date-time": "2017-06-22T00:00:00Z",
+      "timestamp": 1498089600000
+     },
+     "content-version": "unspecified",
+     "delay-in-days": 0,
+     "URL": "https://creativecommons.org/licenses/by/4.0/legalcode"
+    }
+   ],
+   "relation": {
+    "is-preprint-of": [
+     {
+      "id-type": "doi",
+      "id": "10.1177/2378023117733903",
+      "asserted-by": "subject"
+     }
+    ]
+   },
+   "group-title": "SocArXiv",
+   "prefix": "10.31235"
+  },
+  {
+   "DOI": "10.31235/osf.io/fhd59_v1",
+   "title": [
+    "Risky recombinations: Institutional gatekeeping in the innovation process"
+   ],
+   "abstract": "<p>Theories of innovation and technical change posit that inventions thatcombine knowledge across technology domains have greater impact thaninventions drawn from a single domain. The evidence for this claim comesmostly from research on patented inventions and ignores failed patentapplications. We draw on insights from research into institutionalgatekeeping to theorize that, to be granted, patent applications that spantechnological domains must have higher quality than otherwise-comparable,narrower applications. Using data on failed and successful patentapplications, we estimate an integrated, two-stage model that accounts forthis differential selection. We find that more domain-spanning pat</jats:p>",
+   "author": [
+    {
+     "ORCID": "https://orcid.org/0000-0001-6661-6199",
+     "authenticated-orcid": true,
+     "given": "John-Paul",
+     "family": "Ferguson",
+     "sequence": "first",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    },
+    {
+     "given": "Gianluca",
+     "family": "Carnabuci",
+     "sequence": "additional",
+     "affiliation": [],
+     "role": [
+      {
+       "role": "author",
+       "vocabulary": "crossref"
+      }
+     ]
+    }
+   ],
+   "posted": {
+    "date-parts": [
+     [
+      2016,
+      9,
+      17
+     ]
+    ]
+   },
+   "created": {
+    "date-parts": [
+     [
+      2025,
+      4,
+      22
+     ]
+    ],
+    "date-time": "2025-04-22T21:31:35Z",
+    "timestamp": 1745357495000
+   },
+   "group-title": "SocArXiv",
+   "prefix": "10.31235"
+  }
+ ]
+}

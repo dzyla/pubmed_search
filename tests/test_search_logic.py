@@ -322,3 +322,17 @@ def test_newest_pubmed_version_wins():
     # and an older copy arriving later does not overwrite the newer one
     kept = _dedup([new, old])
     assert len(kept) == 1 and kept[0]["corpus_id"] == 9_000_000
+
+
+def test_grants_with_same_title_are_not_merged():
+    kept = _dedup([
+        {"doi": "", "grant_id": "IK6HX001", "title": "HSR&D Research Career Scientist Award", "score": 0.9,
+         "source": "Grants"},
+        {"doi": "", "grant_id": "IK6HX002", "title": "HSR&D Research Career Scientist Award", "score": 0.8,
+         "source": "Grants"},
+    ])
+    assert len(kept) == 2
+
+
+def test_new_biorxiv_prefix_counts_as_preprint():
+    assert search_logic._is_preprint({"doi": "10.64898/2026.01.02.1", "source": "PubMed"})
