@@ -5,7 +5,7 @@
 #
 #   bash deploy/push.sh            then on the server:   bash deploy/install.sh
 set -euo pipefail
-HOST="${MSS_HOST:-root@152.53.80.217}"
+HOST="${MSS_HOST:-root@manuscript-search.org}"
 DEST=/root/pubmed_search
 cd "$(dirname "$0")/.."
 
