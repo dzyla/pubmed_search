@@ -308,3 +308,17 @@ def test_parquet_rewritten_in_place_is_reread(tmp_path):
     os.utime(path, (2e9, 2e9))
     second, _ = data_handler._get_or_open_dataset(path)
     assert second.to_table().column("title").to_pylist() == ["new title"] * 5
+
+
+def test_newest_pubmed_version_wins():
+    old = {"doi": "10.1/x", "pmid": "123", "corpus_id": 10, "score": 0.9, "source": "PubMed",
+           "title": "A study", "pub_type": "Journal Article"}
+    new = {"doi": "10.1/x", "pmid": "123", "corpus_id": 9_000_000, "score": 0.88, "source": "PubMed",
+           "title": "RETRACTED: A study", "pub_type": "Journal Article; Retracted Publication"}
+    other = {"doi": "10.1/y", "pmid": "456", "corpus_id": 20, "score": 0.85, "source": "PubMed", "title": "B"}
+    kept = _dedup([old, other, new])
+    assert [r["pmid"] for r in kept] == ["123", "456"]
+    assert kept[0]["title"].startswith("RETRACTED") and kept[0]["score"] == 0.9
+    # and an older copy arriving later does not overwrite the newer one
+    kept = _dedup([new, old])
+    assert len(kept) == 1 and kept[0]["corpus_id"] == 9_000_000
