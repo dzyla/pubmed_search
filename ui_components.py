@@ -188,11 +188,13 @@ def render_seeds(seeds: list):
     st.markdown(f'<ul class="mss-seeds">{"".join(items)}</ul>', unsafe_allow_html=True)
 
 
-def render_fingerprint(bits_hex: str):
+def render_fingerprint(bits_hex: str, similar: bool = False):
     svg = fingerprint_svg(bits_hex)
     if svg:
+        lead = ("The example papers combined into one code" if similar
+                else "Your query as the index reads it")
         st.markdown(
-            f'<figure class="mss-print">{svg}<figcaption>Your query as the index reads it: '
+            f'<figure class="mss-print">{svg}<figcaption>{lead}: '
             f'{len(bits_hex) * 4} bits, compared against the code of every paper.</figcaption></figure>',
             unsafe_allow_html=True,
         )

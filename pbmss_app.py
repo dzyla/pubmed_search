@@ -276,7 +276,7 @@ if not final_results.empty:
                 st.rerun()
 
     if meta.get("query_bits"):
-        ui_components.render_fingerprint(meta["query_bits"])
+        ui_components.render_fingerprint(meta["query_bits"], similar=st.session_state.get("view") == "similar")
 
     # Several papers selected -> one "more like these" search
     selected = [k[5:] for k, v in st.session_state.items() if k.startswith("sel::") and v]
