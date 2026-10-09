@@ -1,5 +1,6 @@
-import os
+import json
 import logging
+import os
 import pandas as pd
 import google.genai as genai
 from google.genai import types
@@ -34,57 +35,58 @@ def _build_context(df_results: pd.DataFrame, top_n: int) -> str:
     return "\n\n".join(parts)
 
 
-def summarize_search_results(df_results, api_key, top_n=8):
-    """Generates a summary of the top search results."""
+_ANALYSIS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "summary": {"type": "STRING"},
+        "questions": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": ["summary", "questions"],
+}
+
+
+def analyze_results(df_results, api_key, top_n=8):
+    """
+    One Gemini call that returns (summary, suggested_questions) for the top
+    results — half the wait of separate summary and question requests.
+    On failure returns (error_message, []).
+    """
     client = get_client(api_key)
     if not client:
-        return "Error: Invalid API Key or Client initialization failed."
+        return "Error: Invalid API Key or Client initialization failed.", []
 
-    context_text = _build_context(df_results, top_n)
     prompt = (
-        "You are a skilled research assistant. Summarize the key themes, findings, and trends "
-        "from the following academic papers. Keep it concise (2-3 paragraphs). "
-        "Highlight commonalities, contradictions, or gaps if any.\n\n"
-        + context_text
+        "You are a skilled research assistant. For the academic papers below:\n"
+        "1. summary: summarize the key themes, findings and trends in 2-3 concise "
+        "paragraphs; highlight commonalities, contradictions or gaps, and cite papers "
+        "by their number [x].\n"
+        "2. questions: 3 insightful questions a researcher might ask to understand this "
+        "specific collection of papers better.\n\n"
+        + _build_context(df_results, top_n)
     )
 
     try:
         response = client.models.generate_content(
             model=DEFAULT_MODEL,
             contents=types.Part.from_text(text=prompt),
-            config=types.GenerateContentConfig(temperature=0.7),
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                response_mime_type="application/json",
+                response_schema=_ANALYSIS_SCHEMA,
+            ),
         )
-        return response.text
     except Exception as e:
-        LOGGER.error(f"Summarization failed: {e}")
-        return f"An error occurred during summarization: {e}"
-
-
-def generate_example_questions(df_results, api_key, top_n=8):
-    """Generates 3-4 example questions based on the abstracts."""
-    client = get_client(api_key)
-    if not client:
-        return []
-
-    context_text = _build_context(df_results, top_n)
-    prompt = (
-        "Based on these scientific abstracts, generate 3 insightful questions "
-        "a researcher might ask to understand this specific collection of papers better. "
-        "Return only the questions, one per line. Do not number them.\n\n"
-        + context_text
-    )
+        LOGGER.error(f"Analysis failed: {e}")
+        return f"An error occurred during summarization: {e}", []
 
     try:
-        response = client.models.generate_content(
-            model=DEFAULT_MODEL,
-            contents=types.Part.from_text(text=prompt),
-            config=types.GenerateContentConfig(temperature=0.7),
-        )
-        questions = [q.strip() for q in response.text.split("\n") if q.strip()]
-        return questions[:4]
-    except Exception as e:
-        LOGGER.error(f"Question generation failed: {e}")
-        return []
+        data = json.loads(response.text)
+        summary = str(data.get("summary", "")).strip()
+        questions = [str(q).strip() for q in data.get("questions", []) if str(q).strip()]
+    except (ValueError, TypeError, AttributeError):
+        # Model ignored the schema: show its text as the summary.
+        summary, questions = (response.text or "").strip(), []
+    return summary or "No summary was returned.", questions[:4]
 
 
 def chat_with_context(history, user_message, df_results, api_key, top_n=15):

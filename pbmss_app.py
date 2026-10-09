@@ -158,6 +158,8 @@ if use_ai:
         type="password",
         help="Get key at https://aistudio.google.com/apikey",
     )
+    col_t1.caption("Titles and abstracts of your results are sent to Google Gemini. "
+                   "Your key is used only for this session and is not stored.")
 else:
     ai_api_key = None
 
@@ -375,10 +377,8 @@ if not final_results.empty:
     if use_ai and ai_api_key and not sorted_results.empty:
         if st.session_state.get("ai_summary") is None:
             with st.status("🤖 Generating AI Analysis…", expanded=True) as status:
-                st.write("Summarising abstracts…")
-                summary = gemini_handler.summarize_search_results(sorted_results, ai_api_key)
-                st.write("Generating suggested questions…")
-                questions = gemini_handler.generate_example_questions(sorted_results, ai_api_key)
+                st.write("Summarising abstracts and suggesting questions…")
+                summary, questions = gemini_handler.analyze_results(sorted_results, ai_api_key)
                 st.session_state["ai_summary"] = summary
                 st.session_state["ai_questions"] = questions
                 status.update(label="AI Analysis Complete", state="complete", expanded=True)
