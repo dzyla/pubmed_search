@@ -145,47 +145,87 @@ def save_data_block_json(block_data, start_date, end_date, endpoint, save_direct
     with open(filename, 'w') as file:
         json.dump(block_data, file, indent=4)
 
-@retry_on_exception(requests.exceptions.ConnectionError)
+def _get_with_retry(url, retries=3, backoff=3):
+    """GET with exponential backoff for any requests.exceptions.RequestException.
+    SSL verification is disabled because api.medrxiv.org serves an expired certificate.
+    timeout=(10, 30): 10s to establish TCP connection, 30s to receive data.
+    Using the tuple form is critical — a single int only sets the read timeout and
+    can leave the SSL handshake hanging indefinitely on some systems (e.g. WSL).
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    for attempt in range(retries):
+        print(f"    → GET {url}")
+        try:
+            return requests.get(url, timeout=(10, 30), verify=False)
+        except requests.exceptions.RequestException as e:
+            wait = backoff * (2 ** attempt)
+            print(f"  ⚠ Attempt {attempt + 1}/{retries} failed: {e}")
+            if attempt + 1 < retries:
+                print(f"    Waiting {wait}s before retry...")
+                time.sleep(wait)
+    raise requests.exceptions.RetryError(f"All {retries} retries exhausted for {url}")
+
+
 def fetch_block(endpoint, server, block_start, block_end, save_directory):
+    """
+    Returns True on success, False if the block could not be fetched.
+    Skips fetching if the JSON file already exists on disk (resumable).
+    """
     if server == "biorxiv":
         base_url = f"https://api.biorxiv.org/{endpoint}/{server}/"
     else:
         base_url = f"https://api.medrxiv.org/{endpoint}/{server}/"
-        
+
+    # Check if this block was already fetched in a previous (possibly crashed) run.
+    start_yymmdd = block_start.strftime("%y%m%d")
+    end_yymmdd   = block_end.strftime("%y%m%d")
+    existing_file = os.path.join(save_directory, f"{endpoint}_data_{start_yymmdd}_{end_yymmdd}.json")
+    if os.path.exists(existing_file):
+        print(f"Skipping {server} {block_start.date()} → {block_end.date()} (already on disk).")
+        return True
+
     block_interval = f"{block_start.strftime('%Y-%m-%d')}/{block_end.strftime('%Y-%m-%d')}"
     block_data = []
     cursor = 0
     continue_fetching = True
+    page = 0
 
-    print(f"Fetching {server} block {block_interval}...")
+    print(f"[{server}] Starting block {block_interval}...")
     while continue_fetching:
         url = f"{base_url}{block_interval}/{cursor}/json"
         try:
-            response = requests.get(url, timeout=30)
+            response = _get_with_retry(url)
         except requests.exceptions.RequestException as e:
-            print(f"Network error fetching {url}: {e}")
+            print(f"[{server}] Network error fetching {url}: {e}")
             break
 
         if response.status_code != 200:
-            print(f"Failed {block_interval} at cursor {cursor}. Status: {response.status_code}")
+            print(f"[{server}] Failed {block_interval} at cursor {cursor}. Status: {response.status_code}")
             break
 
         try:
             data = response.json()
         except ValueError:
-            print(f"Invalid JSON response from {url}")
+            print(f"[{server}] Invalid JSON response from {url}")
             break
 
         fetched_count = len(data.get('collection', []))
         if fetched_count > 0:
             block_data.extend(data['collection'])
             cursor += fetched_count
+            page += 1
+            # Print every 10 pages so the user can see progress without flood
+            if page % 10 == 0:
+                print(f"  [{server}] {block_interval} — page {page}, {cursor:,} records so far...")
         else:
             continue_fetching = False
 
     if block_data:
+        print(f"  [{server}] Block {block_interval} done — {len(block_data):,} records.")
         save_data_block_json(block_data, block_start, block_end, endpoint, save_directory)
         return True
+    print(f"  [{server}] Block {block_interval} — no records returned.")
     return False
 
 def convert_json_to_parquet(json_dir, parquet_dir):
@@ -293,7 +333,7 @@ def check_database_integrity(meta_path, embed_path, model):
     
     print(f"✅ Integrity Check Passed. Database is consistent.")
 
-def process_source(source, model):
+def process_source(source, model, override_start: datetime | None = None):
     name = source['name']
     server = source['server']
     conf = source['config_section']
@@ -318,13 +358,15 @@ def process_source(source, model):
     # ---------------------------------------------------------
     
     # 1. Check if we need to force a reset because the master file is missing
-    if not os.path.exists(meta_path):
+    if override_start is not None:
+        start_date = override_start
+        print(f"[{name}] Using --from-date override: {start_date.strftime('%Y-%m-%d')}")
+    elif not os.path.exists(meta_path):
         print(f"[{name}] ⚠️ Master Parquet file missing at {meta_path}.")
         print(f"[{name}] Resetting fetch state to 2013-01-01 to ensure full download.")
         update_state(work_dir, source['state_filename'], "2013-01-01")
         start_date = datetime(2013, 1, 1)
     else:
-        # Load state normally
         last_date_str = get_state(work_dir, source['state_filename'])
         start_date = datetime.strptime(last_date_str, "%Y-%m-%d")
 
@@ -362,39 +404,99 @@ def process_source(source, model):
     os.makedirs(temp_parquet_dir, exist_ok=True)
     
     current_date = start_date
-    tasks = []
-    
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    future_to_block = {}
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
         while current_date <= end_date:
             block_start = current_date
             block_end = min(current_date + relativedelta(months=1) - relativedelta(days=1), end_date)
-            
+
             if block_start > block_end:
                 break
-                
-            tasks.append(executor.submit(
+
+            future = executor.submit(
                 fetch_block, source['endpoint'], server, block_start, block_end, temp_json_dir
-            ))
+            )
+            future_to_block[future] = (block_start, block_end)
             current_date += relativedelta(months=1)
-            
-        for future in as_completed(tasks):
-            future.result() 
+
+        total_blocks = len(future_to_block)
+        completed = 0
+        failed_blocks = []
+        for future in as_completed(future_to_block):
+            bs, be = future_to_block[future]
+            completed += 1
+            try:
+                ok = future.result()
+            except Exception as exc:
+                ok = False
+                print(f"[{name}] Block {bs.date()} → {be.date()} raised: {exc}")
+            status = "OK" if ok else "FAILED"
+            print(f"[{name}] [{completed}/{total_blocks}] {bs.strftime('%Y-%m')} — {status}")
+            if not ok:
+                failed_blocks.append(bs)
+
+    if failed_blocks:
+        failed_blocks.sort()
+        print(f"\n[{name}] ⚠️  {len(failed_blocks)} block(s) failed to fetch:")
+        for fb in failed_blocks:
+            print(f"         • {fb.strftime('%Y-%m-%d')}")
+
+        # Persist the failure log so the user can inspect it later.
+        gap_log_path = os.path.join(work_dir, "failed_blocks.log")
+        with open(gap_log_path, "a") as gf:
+            gf.write(f"\n--- {datetime.now().isoformat()} ---\n")
+            for fb in failed_blocks:
+                gf.write(f"{fb.strftime('%Y-%m-%d')}\n")
+        print(f"[{name}] Failed block dates appended to: {gap_log_path}")
+        print(f"[{name}] To backfill, re-run with: "
+              f"--from-date {min(failed_blocks).strftime('%Y-%m-%d')} --source {server}")
+
+        # Advance state only up to the day before the earliest failure so the
+        # next run re-tries the missing months.
+        safe_advance = min(failed_blocks) - relativedelta(days=1)
+        if safe_advance <= start_date:
+            print(f"[{name}] First block failed — state not advanced.")
+            effective_end = None
+        else:
+            effective_end = safe_advance
+            print(f"[{name}] State will advance to {effective_end.strftime('%Y-%m-%d')} (before first failure).")
+    else:
+        effective_end = end_date
 
     # 3. Convert & Load Incoming
     incoming_files = convert_json_to_parquet(temp_json_dir, temp_parquet_dir)
-    
+
     if not incoming_files:
         print(f"[{name}] No new data found/converted.")
-        update_state(work_dir, source['state_filename'], end_date.strftime("%Y-%m-%d"))
-        shutil.rmtree(temp_json_dir, ignore_errors=True)
-        shutil.rmtree(temp_parquet_dir, ignore_errors=True)
+        if effective_end:
+            update_state(work_dir, source['state_filename'], effective_end.strftime("%Y-%m-%d"))
+        # Keep temp dirs if blocks failed so the next run can skip already-fetched ones.
+        if not failed_blocks:
+            shutil.rmtree(temp_json_dir, ignore_errors=True)
+            shutil.rmtree(temp_parquet_dir, ignore_errors=True)
         return
 
     # 4. Load Master Database
     if os.path.exists(meta_path) and os.path.exists(embed_path):
         existing_df = pd.read_parquet(meta_path)
         existing_embeddings = np.load(embed_path)
-        
+
+        # Heal a mismatch caused by a previous crash mid-save: the parquet may
+        # have more rows than the .npy if embedding was interrupted.
+        if len(existing_embeddings) < len(existing_df):
+            missing_count = len(existing_df) - len(existing_embeddings)
+            print(f"[{name}] ⚠️  Embedding/parquet mismatch: "
+                  f"{len(existing_embeddings):,} embeddings vs {len(existing_df):,} rows. "
+                  f"Generating {missing_count:,} missing embeddings…")
+            missing_df = existing_df.iloc[len(existing_embeddings):]
+            missing_texts = build_input_texts(missing_df)
+            missing_embs = generate_embeddings_batched(model, missing_texts,
+                                                       desc=f"Healing {name}")
+            existing_embeddings = np.vstack([existing_embeddings, missing_embs])
+            np.save(embed_path, existing_embeddings)
+            print(f"[{name}] ✅ Embeddings healed and saved.")
+
         # Prepare for deduplication
         existing_df['signature'] = existing_df['title'].fillna('') + existing_df['abstract'].fillna('')
         seen_signatures = set(existing_df['signature'].unique())
@@ -440,11 +542,18 @@ def process_source(source, model):
         print(f"[{name}] All fetched data was duplicate.")
 
     # 8. Cleanup & Update Clock
-    print(f"[{name}] Cleaning up temp files...")
-    shutil.rmtree(temp_json_dir, ignore_errors=True)
-    shutil.rmtree(temp_parquet_dir, ignore_errors=True)
-    
-    update_state(work_dir, source['state_filename'], end_date.strftime("%Y-%m-%d"))
+    # Only wipe temp dirs when all blocks succeeded; on partial failure keep
+    # the JSON files so the next run can skip already-fetched months.
+    if not failed_blocks:
+        print(f"[{name}] Cleaning up temp files...")
+        shutil.rmtree(temp_json_dir, ignore_errors=True)
+        shutil.rmtree(temp_parquet_dir, ignore_errors=True)
+    else:
+        print(f"[{name}] Keeping temp files for {len(failed_blocks)} failed block(s) — "
+              "re-run to fetch missing months.")
+
+    if effective_end:
+        update_state(work_dir, source['state_filename'], effective_end.strftime("%Y-%m-%d"))
 
     # 9. Integrity Check
     check_database_integrity(meta_path, embed_path, model)
@@ -453,28 +562,56 @@ def process_source(source, model):
 # 5. MAIN EXECUTION
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Update BioRxiv/MedRxiv database.")
+    parser.add_argument(
+        "--from-date",
+        metavar="YYYY-MM-DD",
+        help=(
+            "Override the saved fetch state and re-fetch from this date. "
+            "Useful to backfill months that silently failed in previous runs. "
+            "Deduplication prevents re-adding records already in the database."
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        choices=["biorxiv", "medrxiv", "both"],
+        default="both",
+        help="Which source to update (default: both).",
+    )
+    args = parser.parse_args()
+
+    override_start: datetime | None = None
+    if args.from_date:
+        try:
+            override_start = datetime.strptime(args.from_date, "%Y-%m-%d")
+            print(f"⚠️  --from-date override: will fetch from {args.from_date} "
+                  "regardless of saved state.")
+        except ValueError:
+            print(f"Invalid --from-date '{args.from_date}'. Expected YYYY-MM-DD.")
+            exit(1)
+
+    active_sources = [s for s in SOURCES
+                      if args.source == "both" or s["server"] == args.source]
+
     print(f"--- Loading Model {MODEL_ID} ---")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     try:
         model = SentenceTransformer(
-            MODEL_ID, 
+            MODEL_ID,
             device=device,
             model_kwargs={"torch_dtype": torch.float16, "attn_implementation": "sdpa"},
             trust_remote_code=True
         )
-        # Optional: Compile for B200/RTX5080 speedup
-        # try:
-        #    model = torch.compile(model)
-        # except: pass
     except Exception as e:
         print(f"Error loading model: {e}")
         exit(1)
 
-    for source in SOURCES:
+    for source in active_sources:
         try:
-            process_source(source, model)
+            process_source(source, model, override_start=override_start)
         except Exception as e:
             print(f"CRITICAL ERROR processing {source['name']}: {e}")
             import traceback
