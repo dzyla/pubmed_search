@@ -772,13 +772,13 @@ class ChunkedSearcher:
 
         return all_candidates
 
-    def fetch_rows(self, candidates):
-        """Fetches full metadata rows from Parquet for the given candidates."""
+    def fetch_rows(self, candidates, columns=None):
+        """Fetches metadata rows from Parquet for the given candidates (all wishlist columns by default)."""
         if not candidates:
             return pd.DataFrame()
         return fetch_specific_rows(
             candidates, self.metadata, self.data_folder,
-            self.combined_data_file, intervals=self.intervals,
+            self.combined_data_file, intervals=self.intervals, columns=columns,
         )
 
 
@@ -906,6 +906,72 @@ def combined_search_orchestrator(
     return result_df
 
 
+_DATE_COLUMNS = ["date", "update_date", "posted"]
+
+
+def _filter_candidates_by_date(candidates, searchers, start_date, end_date) -> list:
+    """
+    Keeps candidates whose publication date is in range, reading only the date
+    column from parquet (much cheaper than full rows with abstracts).
+    Preserves the input (score) order.
+    """
+    start = pd.to_datetime(start_date) if start_date else None
+    end = pd.to_datetime(end_date) if end_date else None
+    by_source: dict = {}
+    for c in candidates:
+        by_source.setdefault(c["source"], []).append(c)
+
+    passing: set = set()
+    for source_name, subset in by_source.items():
+        searcher = searchers.get(source_name)
+        if not searcher:
+            continue
+        try:
+            df = searcher.fetch_rows(subset, columns=_DATE_COLUMNS)
+        except Exception as e:
+            LOGGER.error(f"Date pre-filter failed for {source_name}: {e}")
+            continue
+        if df.empty:
+            continue
+        date_col = next((c for c in _DATE_COLUMNS if c in df.columns), None)
+        if date_col is None:
+            continue
+        dates = pd.to_datetime(df[date_col], errors="coerce")
+        mask = dates.notna()
+        if start is not None:
+            mask &= dates >= start
+        if end is not None:
+            mask &= dates <= end
+        passing.update((source_name, cid) for cid in df.loc[mask, "corpus_id"])
+    return [c for c in candidates if (c["source"], c["corpus_id"]) in passing]
+
+
+def _candidate_batches(candidates, batch_size, date_filter, searchers):
+    """
+    Yields score-ordered batches of candidates for full-row fetching.
+    With a date filter, candidates are first screened on the date column alone,
+    probing ever larger slices so a rare date range takes a few rounds, not
+    hundreds of 50-row rounds.
+    """
+    if not date_filter:
+        for i in range(0, len(candidates), batch_size):
+            yield candidates[i:i + batch_size]
+        return
+
+    start_date, end_date = date_filter
+    pending: list = []
+    pos, probe = 0, max(200, batch_size * 4)
+    while pos < len(candidates) or pending:
+        if len(pending) < batch_size and pos < len(candidates):
+            chunk = candidates[pos:pos + probe]
+            pos += probe
+            probe = min(probe * 2, 20_000)
+            pending += _filter_candidates_by_date(chunk, searchers, start_date, end_date)
+            continue
+        yield pending[:batch_size]
+        pending = pending[batch_size:]
+
+
 def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_quality, query_float):
     """The uncached search behind combined_search_orchestrator."""
     sources_map = {
@@ -918,7 +984,10 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     all_global_candidates = []
 
     # Generous raw limit so filtering/dedup has enough candidates to work with.
-    raw_retrieval_limit = max(5000, top_k * 100)
+    # Date-filtered searches screen candidates cheaply (date column only), so
+    # they can afford a deeper pool — rare date ranges otherwise run dry.
+    date_filter = (start_date, end_date) if (start_date or end_date) else None
+    raw_retrieval_limit = max(5000, top_k * 100) * (4 if date_filter else 1)
 
     # --- 1. Retrieve raw candidates from all sources in parallel ---
     def _search_source(source_name, config):
@@ -956,11 +1025,9 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     # --- 3. Batched fetch + filter + live dedup ---
     batch_size = max(50, top_k)
 
-    for i in range(0, len(all_global_candidates), batch_size):
+    for batch_candidates in _candidate_batches(all_global_candidates, batch_size, date_filter, searchers):
         if len(final_valid_rows) >= top_k:
             break
-
-        batch_candidates = all_global_candidates[i : i + batch_size]
 
         candidates_by_source: dict = {}
         for c in batch_candidates:
