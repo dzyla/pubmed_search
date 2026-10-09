@@ -181,7 +181,21 @@ def _authors_short(authors: str, keep: int = 6) -> str:
     names = [a.strip() for a in re.split(r"\s*[;,]\s*(?=[A-Z])|\s*;\s*", str(authors or "")) if a.strip()]
     if not names or names == ["N/A"]:
         return ""
-    return ", ".join(names[:keep]) + (", et al." if len(names) > keep else ".")
+    text = ", ".join(names[:keep]) + (", et al" if len(names) > keep else "")
+    return text.rstrip(".") + "."
+
+
+# Structured-abstract headings that bioRxiv/medRxiv deliver glued to the text
+# ("BackgroundHydroxychloroquine is…").
+_SECTION_GLUE = re.compile(
+    r"\b(Background|Objectives?|Aims?|Purpose|Importance|Introduction|Methods?|Design|Setting|"
+    r"Participants|Interventions|Main outcome measures|Data sources|Study selection|Results|"
+    r"Findings|Conclusions?|Interpretation|Significance|Funding)(?=[A-Z][a-z])"
+)
+
+
+def tidy_abstract(text: str) -> str:
+    return _SECTION_GLUE.sub(r"\1: ", str(text or ""))
 
 
 def _links(row) -> list:
@@ -224,7 +238,7 @@ def render_entry(row, rank: int, citations, top_score: float):
     facts.append(f'<span class="mss-meter" title="Relevance relative to the best match '
                  f'(similarity {score:.3f})" aria-hidden="true"><span style="width:{pct}%"></span></span>')
 
-    abstract = str(row.get("abstract") or "")
+    abstract = tidy_abstract(row.get("abstract"))
     snippet = abstract if len(abstract) <= 320 else abstract[:300].rsplit(" ", 1)[0] + " …"
     link_html = "".join(
         f'<a href="{_safe_url(u)}" target="_blank" rel="noopener">{_e(label)}</a>'
