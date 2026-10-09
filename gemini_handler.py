@@ -1,6 +1,5 @@
 import os
 import logging
-import functools
 import pandas as pd
 import google.genai as genai
 from google.genai import types
@@ -11,21 +10,18 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_MODEL = os.environ.get("MSS_GEMINI_MODEL", "gemini-3-flash-preview")
 
 
-@functools.lru_cache(maxsize=8)
-def _get_cached_client(api_key: str):
-    """One GenAI client per key, cached for the process lifetime."""
+def get_client(api_key: str):
+    """
+    Creates a GenAI client for this call only. Users' keys are not cached at
+    process level, so a key never outlives the session that supplied it.
+    """
+    if not api_key:
+        return None
     try:
         return genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
     except Exception as e:
         LOGGER.error(f"Failed to initialize GenAI client: {e}")
         return None
-
-
-def get_client(api_key: str):
-    """Returns a cached client; returns None without hitting lru_cache for falsy keys."""
-    if not api_key:
-        return None
-    return _get_cached_client(api_key)
 
 
 def _build_context(df_results: pd.DataFrame, top_n: int) -> str:

@@ -23,6 +23,13 @@ streamlit run pbmss_app.py -- --config ./config_mss.yaml
 uvicorn search_api:app --host 0.0.0.0 --port 8080
 ```
 
+## Tests
+
+```bash
+python -m pytest tests/
+```
+Tests build a small synthetic corpus in a temp dir (no real data, model server, or network needed). Use the `pubmed_search` conda env locally (same streamlit/pandas versions as the server).
+
 ## Architecture
 
 ### Three-process design

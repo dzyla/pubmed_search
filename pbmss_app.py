@@ -172,6 +172,12 @@ if submitted and query:
     st.session_state["clean_doi"] = None
     st.session_state["full_text_links"] = None
 
+    if len(query) > 2000:
+        st.info(
+            "Long query: the embedding model reads only about the first 512 tokens "
+            "(~2,000 characters), so text beyond that does not affect the results."
+        )
+
     with st.status("Searching…", expanded=True) as status:
         t0 = datetime.now()
 

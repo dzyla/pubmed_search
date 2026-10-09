@@ -184,7 +184,7 @@ def _write_json_atomic(path: str, data: dict):
 def copy_file_into_chunk(file_info, memmap_array, offset):
     """Copies a source .npy file into the large memory-mapped chunk."""
     try:
-        arr = np.load(file_info["path"], mmap_mode="r", allow_pickle=True)
+        arr = np.load(file_info["path"], mmap_mode="r", allow_pickle=False)
         rows = file_info["rows"]
         memmap_array[offset : offset + rows] = arr[:rows]
         return {
@@ -328,7 +328,7 @@ class ChunkedSearcher:
                     sampled_dims: dict = {}
                     for sp in sample_paths:
                         try:
-                            s = np.load(str(sp), mmap_mode="r", allow_pickle=True)
+                            s = np.load(str(sp), mmap_mode="r", allow_pickle=False)
                             d = s.shape[1] if s.ndim > 1 else 0
                             if d:
                                 sampled_dims[d] = sampled_dims.get(d, 0) + 1
@@ -530,7 +530,7 @@ class ChunkedSearcher:
 
         for p in new_file_paths:
             try:
-                arr = np.load(p, mmap_mode="r", allow_pickle=True)
+                arr = np.load(p, mmap_mode="r", allow_pickle=False)
                 rows = arr.shape[0]
                 dims = arr.shape[1] if arr.ndim > 1 else 1
                 if dims != embedding_dim:
@@ -631,7 +631,7 @@ class ChunkedSearcher:
         LOGGER.info("Scanning all source files …")
         for p in source_files:
             try:
-                arr = np.load(p, mmap_mode="r", allow_pickle=True)
+                arr = np.load(p, mmap_mode="r", allow_pickle=False)
                 rows = arr.shape[0]
                 dims = arr.shape[1] if arr.ndim > 1 else 1
                 if embedding_dim is None:

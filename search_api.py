@@ -21,6 +21,7 @@ import secrets
 import yaml
 import requests
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, Security
@@ -202,12 +203,12 @@ class SearchRequest(BaseModel):
         le=10,
         description="Number of results to return. Must be between 5 and 10.",
     )
-    start_date: Optional[str] = Field(
+    start_date: Optional[date] = Field(
         default=None,
         description="Restrict results to papers published on or after this date (YYYY-MM-DD).",
         examples=["2020-01-01"],
     )
-    end_date: Optional[str] = Field(
+    end_date: Optional[date] = Field(
         default=None,
         description="Restrict results to papers published on or before this date (YYYY-MM-DD).",
         examples=["2024-12-31"],
@@ -290,13 +291,17 @@ async def search(req: SearchRequest):
     if CONFIGS is None:
         raise HTTPException(status_code=503, detail="Search index configuration is unavailable.")
 
+    if req.start_date and req.end_date and req.start_date > req.end_date:
+        raise HTTPException(status_code=422, detail="start_date must not be after end_date.")
+
     t0 = time.perf_counter()
 
-    # --- Encode query via shared api_handler (no Streamlit dependency) ---
+    # --- Encode query via shared api_handler (blocking HTTP call → worker thread) ---
     try:
-        query_packed = get_query_embedding_packed(req.query, server_url=MODEL_URL)
+        query_packed = await asyncio.to_thread(get_query_embedding_packed, req.query, MODEL_URL)
     except EmbeddingError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        LOGGER.error(f"Embedding failed: {exc}")
+        raise HTTPException(status_code=503, detail="Embedding service unavailable. Please try again later.")
 
     # --- Run the CPU-bound search in a thread so the event loop stays free ---
     try:
@@ -305,16 +310,16 @@ async def search(req: SearchRequest):
             query_packed,
             CONFIGS,
             req.top_k,
-            req.start_date,
-            req.end_date,
+            req.start_date.isoformat() if req.start_date else None,
+            req.end_date.isoformat() if req.end_date else None,
             req.high_quality_only,
         )
     except Exception as exc:
         LOGGER.exception("Search failed")
-        raise HTTPException(status_code=500, detail=f"Search error: {exc}")
+        raise HTTPException(status_code=500, detail="Search failed. Please try again later.")
 
     elapsed = round(time.perf_counter() - t0, 2)
-    LOGGER.info(f"Search '{req.query[:60]}' → {len(results_df)} results in {elapsed}s")
+    LOGGER.info(f"Search ({len(req.query)} chars) → {len(results_df)} results in {elapsed}s")
 
     if results_df.empty:
         return SearchResponse(
