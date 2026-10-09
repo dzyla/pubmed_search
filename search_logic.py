@@ -21,7 +21,8 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
-_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials")
+_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants")
+_PREPRINT_DOI_PREFIXES = ("10.1101/", "10.64898/")     # bioRxiv/medRxiv (old and new prefix)
 
 # ---------------------------------------------------------------------------
 # Module-level caches — shared across all Streamlit sessions / reruns
@@ -336,7 +337,8 @@ class ChunkedSearcher:
             scores = rescore_with_float_query(query_float, codes)
         else:
             scores = 1.0 - np.unpackbits(codes ^ np.asarray(query_packed).reshape(1, -1), axis=1).sum(1) / (codes.shape[1] * 8)
-        share = hits.sum(axis=1) / len(token_hashes)
+        # Share of the query's indexed identifiers (common words are not indexed).
+        share = hits.sum(axis=1) / len(per_token)
         boost = np.where(share >= 1.0, EXACT_BOOST, EXACT_BOOST * 0.5 * share)
         tokens = list(per_token)
         return [
@@ -940,6 +942,10 @@ RESULT_COLUMNS = [
     "pmid", "pub_type", "published_doi", "version",
     # ClinicalTrials.gov
     "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
+    # other preprint servers
+    "published_pmid", "license",
+    # NIH grants
+    "grant_id", "appl_id", "ic", "activity_code", "organization", "fiscal_year",
     "corpus_id",   # global row id; within PubMed, a larger id = a newer record version
     "matched_terms",   # identifier tokens of the query found in this document
 ]
@@ -947,7 +953,7 @@ RESULT_COLUMNS = [
 # Exact-term matching: candidates per source and score boost when a document
 # contains every identifier of the query (scores are cosines mapped to [0, 1]).
 EXACT_MAX_DOCS = 2000
-EXACT_BOOST = 0.06
+EXACT_BOOST = 0.08   # calibrated on real PubMed data (see eval/README.md)
 MAX_QUERY_IDENTIFIERS = 6
 
 
@@ -966,7 +972,8 @@ def _title_key(title) -> str:
 
 
 def _is_preprint(row: dict) -> bool:
-    return _norm_doi(row.get("doi")).startswith("10.1101/") or row.get("source") in ("BioRxiv", "MedRxiv")
+    return (_norm_doi(row.get("doi")).startswith(_PREPRINT_DOI_PREFIXES)
+            or row.get("source") in ("BioRxiv", "MedRxiv", "Preprints"))
 
 
 def _newer_version(row: dict, kept: dict) -> bool:
@@ -985,8 +992,9 @@ def _add_or_merge(rows: list, seen: dict, row: dict) -> bool:
     version is kept in the better-ranked slot and the preprint DOI is recorded
     on it as preprint_doi. Returns True if appended.
     """
-    # Trials have no DOI; their registry id identifies them.
-    doi = _norm_doi(row.get("doi")) or str(row.get("nct_id") or "").strip().lower()
+    # Trials and grants have no DOI; their registry / project number identifies them.
+    doi = (_norm_doi(row.get("doi")) or str(row.get("nct_id") or "").strip().lower()
+           or (f"grant:{row['grant_id']}".lower() if row.get("grant_id") else ""))
     published = _norm_doi(row.get("published_doi"))
     title = str(row.get("title") or "").strip().lower()
     title_key = _title_key(title)
@@ -1335,8 +1343,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         result_df.loc[med_mask, "source"] = "MedRxiv"
 
     if "doi" in result_df.columns:
-        preprint_mask = (result_df["source"] == "PubMed") & result_df["doi"].str.contains(
-            "10.1101", na=False
+        preprint_mask = (result_df["source"] == "PubMed") & result_df["doi"].astype(str).str.contains(
+            r"10\.1101/|10\.64898/", na=False
         )
         result_df.loc[preprint_mask, "source"] = "BioRxiv"
 

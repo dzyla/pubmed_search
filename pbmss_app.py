@@ -30,7 +30,8 @@ import ui_data
 
 LOGGER = logging.getLogger(__name__)
 
-SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials"]
+SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants"]
+DEFAULT_SOURCES = [s for s in SOURCE_OPTIONS if s != "Grants"]   # grants are opt-in
 SOURCE_LABELS = ui_components.SOURCE_NAMES
 
 st.set_page_config(page_title="Manuscript Search", page_icon="📜", layout="centered")
@@ -125,7 +126,7 @@ with st.form("search_form", border=False):
     c1, c2, c3 = st.columns([1, 2, 1.3], vertical_alignment="bottom")
     num_to_show = c1.number_input("Results", min_value=1, max_value=50, value=10)
     sources = c2.pills(
-        "Databases", SOURCE_OPTIONS, default=SOURCE_OPTIONS, selection_mode="multi",
+        "Databases", SOURCE_OPTIONS, default=DEFAULT_SOURCES, selection_mode="multi",
         format_func=lambda s: SOURCE_LABELS[s],
     ) or []
     use_high_quality = c3.toggle(
@@ -187,7 +188,7 @@ elif submitted and query:
             results, meta = backend_client.search(
                 query, top_k=int(num_to_show), start_date=start_date_str, end_date=end_date_str,
                 high_quality_only=use_high_quality,
-                sources=None if set(sources) == set(SOURCE_OPTIONS) else sources,
+                sources=sources,
             )
         except backend_client.BackendBusy as exc:
             st.warning(str(exc))
@@ -215,7 +216,7 @@ if similar_refs:
             results, meta = backend_client.similar(
                 similar_refs, top_k=int(num_to_show), start_date=start_date_str, end_date=end_date_str,
                 high_quality_only=use_high_quality,
-                sources=None if set(sources) == set(SOURCE_OPTIONS) else sources,
+                sources=sources,
             )
             _store_results(results, meta, t0)
             st.session_state["view"] = "similar"

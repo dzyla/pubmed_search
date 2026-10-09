@@ -22,10 +22,11 @@ LOGGER = logging.getLogger(__name__)
 INK, EOSIN, MUTED, RULE, GLASS = "#2A2250", "#C8336B", "#6D6884", "#DDD9E8", "#F4F3F8"
 # Methyl green (a classic counterstain) for trials, keeping the histology palette.
 SOURCE_COLORS = {"PubMed": INK, "BioRxiv": EOSIN, "MedRxiv": "#7A6FB0", "arXiv": "#B7832F",
-                 "ClinicalTrials": "#3E7D63"}
+                 "ClinicalTrials": "#3E7D63", "Preprints": "#A0507A", "Grants": "#56708F"}
 SOURCE_NAMES = {"PubMed": "PubMed", "BioRxiv": "bioRxiv", "MedRxiv": "medRxiv", "arXiv": "arXiv",
-                "ClinicalTrials": "ClinicalTrials.gov"}
-_NO_CITATIONS = {"arXiv", "ClinicalTrials"}   # no Crossref DOI to count citations for
+                "ClinicalTrials": "ClinicalTrials.gov", "Preprints": "Other preprints",
+                "Grants": "NIH grants"}
+_NO_CITATIONS = {"arXiv", "ClinicalTrials", "Grants"}   # no Crossref DOI to count citations for
 _SERVER_NAMES = {"biorxiv": "bioRxiv", "medrxiv": "medRxiv"}
 
 _CSS = f"""
@@ -242,8 +243,12 @@ def render_entry(row, rank: int, citations, top_score: float, term_display: dict
     journal = _e(row.get("journal"))
     journal = "" if journal in ("N/A", "nan") else _SERVER_NAMES.get(journal.lower(), journal)
     when = _e(row.get("date"))
-    if str(row.get("source")) == "ClinicalTrials":
-        nct = _e(row.get("nct_id")) or (_e(row.get("url", "")).rsplit("/", 1)[-1])
+    if str(row.get("source")) == "Grants":
+        pis = _e(_authors_short(row.get("authors"), keep=3)).rstrip(".")
+        cite = (f"{pis + '. ' if pis else ''}<em>{journal or 'NIH RePORTER'}</em> "
+                f"{_e(row.get('registry_id') or row.get('grant_id') or '')}{', funded ' + when if when else ''}.")
+    elif str(row.get("source")) == "ClinicalTrials":
+        nct = _e(row.get("registry_id") or row.get("nct_id")) or (_e(row.get("url", "")).rsplit("/", 1)[-1])
         sponsor = _e(row.get("authors"))
         cite = (f"{sponsor + '. ' if sponsor and sponsor != 'N/A' else ''}<em>ClinicalTrials.gov</em> "
                 f"{nct}{', registered ' + when if when else ''}.")
@@ -371,10 +376,10 @@ def generate_bibtex(df: pd.DataFrame) -> str:
         if journal.lower() in ("nan", "", "n/a"):
             journal = source.capitalize()
 
-        if source == "clinicaltrials":
+        if source in ("clinicaltrials", "grants"):
             url = _row_url(row) or ""
             entries.append(f"@misc{{{key},\n  author = {{{authors}}},\n  title = {{{title}}},\n"
-                           f"  howpublished = {{ClinicalTrials.gov, {row.get('nct_id', '')}}},\n"
+                           f"  howpublished = {{{journal}, {row.get('nct_id') or row.get('grant_id') or ''}}},\n"
                            f"  year = {{{year}}},\n  url = {{{url}}},\n}}\n")
             continue
 
@@ -398,7 +403,8 @@ def generate_ris(df: pd.DataFrame) -> str:
     records = []
     for _, row in df.iterrows():
         source = str(row.get("source", ""))
-        ris_type = {"BioRxiv": "UNPB", "MedRxiv": "UNPB", "arXiv": "UNPB", "ClinicalTrials": "GEN"}.get(source, "JOUR")
+        ris_type = {"BioRxiv": "UNPB", "MedRxiv": "UNPB", "arXiv": "UNPB", "Preprints": "UNPB",
+                    "ClinicalTrials": "GEN", "Grants": "GRANT"}.get(source, "JOUR")
         lines = [f"TY  - {ris_type}"]
         lines.append(f"TI  - {row.get('title', '')}")
         for author in re.split(r"\s*;\s*", str(row.get("authors") or "")):

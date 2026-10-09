@@ -1,0 +1,123 @@
+{
+ "meta": {
+  "total": 2
+ },
+ "results": [
+  {
+   "appl_id": 10975859,
+   "subproject_id": null,
+   "fiscal_year": 2025,
+   "project_num": "5R01AI116059-10",
+   "organization": {
+    "org_name": "STANFORD UNIVERSITY",
+    "city": null,
+    "country": null,
+    "org_city": "STANFORD",
+    "org_country": "UNITED STATES",
+    "org_state": "CA",
+    "org_state_name": null,
+    "dept_type": "MICROBIOLOGY/IMMUN/VIROLOGY",
+    "fips_country_code": null,
+    "org_duns": [
+     "009214214"
+    ],
+    "org_ueis": [
+     "HJD6G4D6TJY5"
+    ],
+    "primary_duns": "009214214",
+    "primary_uei": "HJD6G4D6TJY5",
+    "org_fips": "US",
+    "org_ipf_code": "8046501",
+    "org_zipcode": "943052004",
+    "external_org_id": 8046501
+   },
+   "award_type": "5",
+   "activity_code": "R01",
+   "award_amount": 430311,
+   "principal_investigators": [
+    {
+     "profile_id": 3124667,
+     "first_name": "Denise",
+     "middle_name": "M",
+     "last_name": "Monack",
+     "is_contact_pi": true,
+     "full_name": "Denise M Monack",
+     "title": "PROFESSOR"
+    }
+   ],
+   "agency_ic_admin": {
+    "code": "AI",
+    "abbreviation": "NIAID",
+    "name": "National Institute of Allergy and Infectious Diseases",
+    "admin_org_id": "12500003",
+    "admin_funding_url": ""
+   },
+   "project_start_date": "2014-11-01T00:00:00",
+   "project_end_date": "2025-10-31T00:00:00",
+   "award_notice_date": "2024-11-05T00:00:00",
+   "core_project_num": "R01AI116059",
+   "abstract_text": "ABSTRACT\nHost-adapted strains of Salmonella enterica cause systemic infections and have the ability to persist systemically\nwithin granulomas for long periods of time. Persistently infected hosts are often asymptomatic and transmit\ndisease to na\u00efve hosts, thereby serving as a critical reservoir for disease. From the bacterial perspective,\npersistent infection is essential for microbial survival in nature. However, very little is known about the molecular\nmechanisms involved in persistent Salmone",
+   "project_title": "Mechanisms of persistent Salmonella infection",
+   "budget_start": "2024-11-01T00:00:00",
+   "date_added": "2024-11-09T16:11:31"
+  },
+  {
+   "appl_id": 11015405,
+   "subproject_id": null,
+   "fiscal_year": 2025,
+   "project_num": "3R01AI116059-10S1",
+   "organization": {
+    "org_name": "STANFORD UNIVERSITY",
+    "city": null,
+    "country": null,
+    "org_city": "STANFORD",
+    "org_country": "UNITED STATES",
+    "org_state": "CA",
+    "org_state_name": null,
+    "dept_type": "MICROBIOLOGY/IMMUN/VIROLOGY",
+    "fips_country_code": null,
+    "org_duns": [
+     "009214214"
+    ],
+    "org_ueis": [
+     "HJD6G4D6TJY5"
+    ],
+    "primary_duns": "009214214",
+    "primary_uei": "HJD6G4D6TJY5",
+    "org_fips": "US",
+    "org_ipf_code": "8046501",
+    "org_zipcode": "943052004",
+    "external_org_id": 8046501
+   },
+   "award_type": "3",
+   "activity_code": "R01",
+   "award_amount": 114779,
+   "principal_investigators": [
+    {
+     "profile_id": 3124667,
+     "first_name": "Denise",
+     "middle_name": "M",
+     "last_name": "Monack",
+     "is_contact_pi": true,
+     "full_name": "Denise M Monack",
+     "title": "PROFESSOR"
+    }
+   ],
+   "agency_ic_admin": {
+    "code": "AI",
+    "abbreviation": "NIAID",
+    "name": "National Institute of Allergy and Infectious Diseases",
+    "admin_org_id": "12500003",
+    "admin_funding_url": ""
+   },
+   "project_start_date": "2014-11-01T00:00:00",
+   "project_end_date": "2025-10-31T00:00:00",
+   "award_notice_date": "2024-11-06T00:00:00",
+   "core_project_num": "R01AI116059",
+   "abstract_text": "ABSTRACT\nHost-adapted strains of Salmonella enterica cause systemic infections and have the ability to persist systemically\nwithin granulomas for long periods of time. Persistently infected hosts are often asymptomatic and transmit\ndisease to na\u00efve hosts, thereby serving as a critical reservoir for disease. From the bacterial perspective,\npersistent infection is essential for microbial survival in nature. However, very little is known about the molecular\nmechanisms involved in persistent Salmone",
+   "project_title": "Mechanisms of persistent Salmonella infection",
+   "budget_start": "2024-11-01T00:00:00",
+   "date_added": "2024-11-09T16:11:31"
+  }
+ ]
+}

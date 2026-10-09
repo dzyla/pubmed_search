@@ -1,10 +1,14 @@
 import yaml
 
 # Order matters: search_logic._SOURCE_NAMES zips over this list.
-SOURCE_KEYS = ("pubmed_config", "biorxiv_config", "medrxiv_config", "arxiv_config", "clinicaltrials_config")
+SOURCE_KEYS = ("pubmed_config", "biorxiv_config", "medrxiv_config", "arxiv_config", "clinicaltrials_config",
+               "preprints_config", "grants_config")
 
 
-SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials")
+SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants")
+# Searched when the caller does not choose sources. Grants are opt-in: funding
+# records should not appear among papers unless asked for.
+DEFAULT_SOURCES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints")
 
 
 def read_source_configs(config_yaml_path: str) -> dict:
