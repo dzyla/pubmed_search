@@ -419,8 +419,9 @@ def results_csv(df: pd.DataFrame) -> str:
 def render_footer():
     st.markdown(
         """<footer class="mss-foot">
-        Built by <a href="https://www.zylalab.org/" target="_blank" rel="noopener">Dawid Zyla</a>
-        at the Zyla Lab. Not affiliated with PubMed, bioRxiv, medRxiv or arXiv.
+        Built by Dawid Zyla at the
+        <a href="https://zylalab.org" target="_blank" rel="noopener">Zyla Lab (zylalab.org)</a>.
+        Not affiliated with PubMed, bioRxiv, medRxiv, arXiv or ClinicalTrials.gov.
         Search from your own code or AI agent with the
         <a href="/docs" target="_blank" rel="noopener">REST API and MCP endpoint</a>.
         <a href="https://www.buymeacoffee.com/dzyla" target="_blank" rel="noopener">Support the server costs</a>.
