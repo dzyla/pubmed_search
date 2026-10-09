@@ -8,7 +8,6 @@ import glob
 import numpy as np
 import pandas as pd
 import torch
-import random
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -269,69 +268,56 @@ def convert_json_to_parquet(json_dir, parquet_dir):
 # -----------------------------------------------------------------------------
 # 4. PROCESSING & INTEGRITY LOGIC
 # -----------------------------------------------------------------------------
-def calculate_hamming_similarity(bits_a, bits_b):
-    """
-    Calculates percentage of matching bits between two packed uint8 arrays.
-    """
-    xor_diff = np.bitwise_xor(bits_a, bits_b)
-    diff_bits = np.unpackbits(xor_diff).sum()
-    
-    total_bits = len(bits_a) * 8
-    matching_bits = total_bits - diff_bits
-    similarity = matching_bits / total_bits
-    return similarity, diff_bits
+def _row_agreement(model, df, embeddings, rows):
+    """Fraction of matching bits between stored codes and fresh embeddings, per row."""
+    fresh = generate_embeddings_batched(model, build_input_texts(df.iloc[rows]), desc="Verifying")
+    return 1 - np.unpackbits(fresh ^ embeddings[rows], axis=1).mean(axis=1), fresh
 
-def check_database_integrity(meta_path, embed_path, model):
+
+def _save_atomic(df, embeddings, meta_path, embed_path):
+    """Write both files to temporaries first, then swap them in (codes first)."""
+    tmp_npy, tmp_parquet = embed_path + ".tmp.npy", meta_path + ".tmp"
+    np.save(tmp_npy, embeddings)
+    # Small row groups: the search app reads a few rows per query, and a
+    # single 357k-row group made every bioRxiv fetch decode the whole file
+    # (1.3 s -> 0.15 s per fetch with 2,000-row groups).
+    df.to_parquet(tmp_parquet, row_group_size=2000, write_page_index=True)
+    os.replace(tmp_npy, embed_path)
+    os.replace(tmp_parquet, meta_path)
+
+
+def check_database_integrity(meta_path, embed_path, model, sample=2000, recent=5000, threshold=0.90):
     """
-    Randomly selects 10 rows, re-calculates embeddings, and checks against NPY file.
+    Re-embeds a random sample plus the newest rows and compares them with the
+    stored codes. If any row is misaligned (a shifted block once slipped in
+    when two runs overlapped, and a 10-row spot check missed it), every row
+    is re-checked and the misaligned codes are replaced with fresh ones.
     """
-    print(f"\n--- Running Database Integrity Check ---")
+    print("\n--- Running Database Integrity Check ---")
     try:
-        df = pd.read_parquet(meta_path)
+        df = pd.read_parquet(meta_path, columns=["title", "abstract"])
         embeddings = np.load(embed_path)
     except Exception as e:
         print(f"Skipping integrity check (Files not ready or missing): {e}")
         return
-
-    total_rows = len(df)
-    if total_rows == 0:
+    n = min(len(df), len(embeddings))
+    if n == 0:
+        return
+    rng = np.random.default_rng()
+    rows = np.unique(np.r_[rng.choice(n, min(sample, n), replace=False), np.arange(max(0, n - recent), n)])
+    agree, _ = _row_agreement(model, df, embeddings, rows)
+    if (agree >= threshold).all():
+        print(f"✅ Integrity Check Passed ({len(rows):,} rows verified, median agreement {np.median(agree):.4f}).")
         return
 
-    indices = random.sample(range(total_rows), min(10, total_rows))
-    print(f"Verifying {len(indices)} random entries...")
-    
-    subset_df = df.iloc[indices].copy()
-    texts_to_check = build_input_texts(subset_df)
-    
-    passed = True
-    
-    for i, idx in enumerate(indices):
-        text = texts_to_check[i]
-        
-        # 1. Fresh embedding
-        emb_float = model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
-        # 2. Quantize
-        packed_fresh = np.packbits(emb_float > 0)
-        # 3. Stored
-        packed_stored = embeddings[idx]
-        
-        # 4. Compare with Tolerance
-        similarity, diff_bits = calculate_hamming_similarity(packed_fresh, packed_stored)
-        
-        # Threshold: 95% similarity
-        if similarity < 0.95:
-            print(f"❌ INTEGRITY FAILURE at index {idx}!")
-            print(f"   Mismatch: {diff_bits} bits differ ({similarity:.2%} match)")
-            passed = False
-        else:
-            if diff_bits > 0:
-                print(f"⚠️  Index {idx}: Matches with minor noise ({diff_bits} bits flipped). OK.")
-            # else: Exact match
-    
-    if not passed:
-        raise ValueError("Database integrity check failed! Significant embedding mismatch detected.")
-    
-    print(f"✅ Integrity Check Passed. Database is consistent.")
+    print(f"❌ {int((agree < threshold).sum())} of {len(rows):,} sampled rows are misaligned — checking every row…")
+    agree, fresh = _row_agreement(model, df, embeddings, np.arange(n))
+    bad = np.flatnonzero(agree < threshold)
+    embeddings[bad] = fresh[bad]
+    full = pd.read_parquet(meta_path)
+    _save_atomic(full, embeddings, meta_path, embed_path)
+    print(f"🔧 REPAIRED {len(bad):,} misaligned rows (rows {bad.min():,}-{bad.max():,}) with fresh embeddings.")
+
 
 def process_source(source, model, override_start: datetime | None = None):
     name = source['name']
@@ -536,11 +522,7 @@ def process_source(source, model, override_start: datetime | None = None):
             final_embeddings = new_binary_embeddings
             
         print(f"[{name}] Saving Master DB with {len(final_df):,} records...")
-        # Small row groups: the search app reads a few rows per query, and a
-        # single 357k-row group made every bioRxiv fetch decode the whole file
-        # (1.3 s -> 0.15 s per fetch with 2,000-row groups).
-        final_df.to_parquet(meta_path, row_group_size=2000, write_page_index=True)
-        np.save(embed_path, final_embeddings)
+        _save_atomic(final_df, final_embeddings, meta_path, embed_path)
     else:
         print(f"[{name}] All fetched data was duplicate.")
 
@@ -597,6 +579,16 @@ if __name__ == "__main__":
 
     active_sources = [s for s in SOURCES
                       if args.source == "both" or s["server"] == args.source]
+
+    # One run at a time: two overlapping runs once wrote one run's codes next
+    # to the other run's metadata, shifting a block of rows.
+    import fcntl
+    lock_file = open(os.path.join(os.path.expanduser("~"), ".biorxiv_medarxiv_update.lock"), "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Another bioRxiv/medRxiv update is already running — exiting.")
+        exit(0)
 
     print(f"--- Loading Model {MODEL_ID} ---")
     device = "cuda" if torch.cuda.is_available() else "cpu"
