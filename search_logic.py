@@ -1000,6 +1000,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         return source_name, searcher, candidates
 
     valid_sources = list(sources_map.items())
+    if not valid_sources:
+        return pd.DataFrame()
 
     with log_time("Scanning All Sources (parallel)"):
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(valid_sources)) as executor:
