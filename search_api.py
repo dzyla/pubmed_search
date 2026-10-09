@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Ensure local modules are importable when run from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import paper_links
 from config_loader import read_source_configs
 from search_logic import combined_search_orchestrator, trigger_database_updates, warm_up_indexes
 from utils import get_clean_doi
@@ -231,6 +232,18 @@ class Paper(BaseModel):
     year: Optional[int]
     score: float = Field(description="Relevance score between 0.0 (no match) and 1.0 (perfect match).")
     source: str = Field(description="Database the paper came from: PubMed | BioRxiv | MedRxiv | arXiv.")
+    url: Optional[str] = Field(default=None, description="Best link to the paper (DOI, arXiv or PubMed).")
+    pmid: Optional[str] = Field(default=None, description="PubMed ID, when available.")
+    labels: List[str] = Field(default_factory=list, description=(
+        "Notable publication types and status, e.g. Retracted, Review, Meta-analysis, RCT, Preprint."))
+    retracted: bool = Field(default=False, description="True if the paper has been retracted.")
+    published_doi: Optional[str] = Field(default=None, description="For preprints: DOI of the journal version.")
+    preprint_doi: Optional[str] = Field(default=None, description="For journal articles: DOI of the merged preprint.")
+
+
+def _optional_str(value) -> Optional[str]:
+    text = str(value or "").strip()
+    return None if text.lower() in ("", "none", "nan", "na") else text
 
 
 class SearchResponse(BaseModel):
@@ -325,24 +338,24 @@ async def search(req: SearchRequest):
 
     papers: List[Paper] = []
     for _, row in results_df.iterrows():
-        # Parse year from date string
-        year: Optional[int] = None
-        date_val = row.get("date")
-        if date_val:
-            try:
-                year = int(str(date_val)[:4])
-            except (ValueError, TypeError):
-                pass
+        row = row.copy()
+        row["doi"] = get_clean_doi(str(row.get("doi", "") or ""))
 
         papers.append(Paper(
             title=str(row.get("title",    "") or "").strip() or "N/A",
             authors=str(row.get("authors",  "") or "").strip() or "N/A",
             journal=str(row.get("journal",  "") or "").strip() or "N/A",
-            doi=get_clean_doi(str(row.get("doi", "") or "")) or "N/A",
+            doi=row["doi"] or "N/A",
             abstract=str(row.get("abstract", "") or "").strip() or "N/A",
-            year=year,
+            year=paper_links.year_of(row),
             score=round(float(row.get("score", 0.0)), 4),
             source=str(row.get("source",  "") or "").strip(),
+            url=paper_links.primary_link(row),
+            pmid=_optional_str(row.get("pmid")),
+            labels=paper_links.badges(row),
+            retracted=paper_links.is_retracted(row),
+            published_doi=_optional_str(row.get("published_doi")),
+            preprint_doi=_optional_str(row.get("preprint_doi")),
         ))
 
     return SearchResponse(

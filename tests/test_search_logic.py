@@ -182,3 +182,36 @@ def test_same_doi_and_doi_less_title_duplicates_are_dropped():
         _row("10.1/b", 0.6, title="Same Title"),      # has its own DOI → kept
     ])
     assert [r["doi"] for r in kept] == ["10.1/a", "10.1/b"]
+
+
+# ---------------------------------------------------------------------------
+# Result cache
+# ---------------------------------------------------------------------------
+
+def test_repeat_search_is_served_from_cache(corpus, monkeypatch):
+    config, _ = corpus
+    search_logic.get_or_create_searcher(config)   # build chunks first (bumps the generation)
+    query = np.full((1, EMB_BYTES), 7, dtype=np.uint8)
+    first = search_logic.combined_search_orchestrator(query, [config, {}, {}, {}], top_k=10)
+
+    calls = []
+    monkeypatch.setattr(search_logic, "_run_search", lambda *a: calls.append(a))
+    second = search_logic.combined_search_orchestrator(query, [config, {}, {}, {}], top_k=10)
+
+    assert calls == []
+    pd.testing.assert_frame_equal(first, second)
+    second.loc[0, "title"] = "mutated"         # callers get a copy
+    third = search_logic.combined_search_orchestrator(query, [config, {}, {}, {}], top_k=10)
+    assert third.loc[0, "title"] != "mutated"
+
+
+def test_index_change_invalidates_cache(corpus):
+    config, _ = corpus
+    search_logic.get_or_create_searcher(config)
+    query = np.full((1, EMB_BYTES), 9, dtype=np.uint8)
+    search_logic.combined_search_orchestrator(query, [config, {}, {}, {}], top_k=10)
+    assert search_logic._RESULT_CACHE
+
+    search_logic._clear_index_cache_for_dir(config["chunk_dir"])
+
+    assert not search_logic._RESULT_CACHE

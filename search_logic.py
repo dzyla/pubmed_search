@@ -9,6 +9,7 @@ import threading
 import pandas as pd
 from pathlib import Path
 import concurrent.futures
+from collections import OrderedDict
 from data_handler import fetch_specific_rows, build_sorted_intervals_from_metadata, clear_parquet_cache
 from utils import log_time
 
@@ -33,6 +34,14 @@ _INDEX_LOCK = threading.Lock()
 _SEARCHER_CACHE: dict = {}
 _SEARCHER_EVENTS: dict = {}  # chunk_dir -> threading.Event (build-in-progress sentinel)
 _SEARCHER_LOCK = threading.Lock()
+
+# Search result cache: (query, filters, sources) -> result DataFrame.
+# Repeat searches (reloads, shared links, API retries) skip the 4–8 s scan.
+# Any index change bumps _INDEX_GENERATION, which is part of the key.
+_RESULT_CACHE: "OrderedDict" = OrderedDict()
+_RESULT_CACHE_MAX = 128
+_RESULT_CACHE_LOCK = threading.Lock()
+_INDEX_GENERATION = 0
 
 # How often trigger_database_updates() runs a full FS scan.
 # Set via MSS_UPDATE_INTERVAL_S env var; 0 disables rate-limiting.
@@ -81,8 +90,17 @@ def _get_or_build_faiss_index(chunk_path: str, actual_rows: int, embedding_dim: 
         event.set()
 
 
+def _invalidate_result_cache():
+    """Drops cached search results; called whenever any index content changes."""
+    global _INDEX_GENERATION
+    with _RESULT_CACHE_LOCK:
+        _INDEX_GENERATION += 1
+        _RESULT_CACHE.clear()
+
+
 def _clear_index_cache_for_dir(chunk_dir: str):
     """Evicts all cached FAISS indexes whose path lives under chunk_dir."""
+    _invalidate_result_cache()
     with _INDEX_LOCK:
         stale = [k for k in _INDEX_CACHE if k.startswith(chunk_dir)]
         for k in stale:
@@ -509,8 +527,10 @@ class ChunkedSearcher:
             extended.flush()
             del extended
 
+            # Only this chunk's index is stale; the others stay cached.
             with _INDEX_LOCK:
                 _INDEX_CACHE.pop(chunk_path, None)
+            _invalidate_result_cache()
 
             last_chunk["actual_rows"] = total_rows
             last_chunk["global_end"] = last_chunk["global_start"] + total_rows - 1
@@ -859,7 +879,35 @@ def combined_search_orchestrator(
     - Uses module-level ChunkedSearcher cache (no repeated metadata JSON reads / globs).
     - Uses module-level FAISS index cache (no repeated memmap→FAISS copies).
     - Sources are searched in parallel using a ThreadPoolExecutor.
+    - Identical repeat searches are served from an LRU result cache.
     """
+    cache_key = (
+        np.asarray(query_packed).tobytes(),
+        None if query_float is None else np.asarray(query_float, dtype=np.float32).tobytes(),
+        tuple(cfg.get("chunk_dir") for cfg in configs if cfg),
+        top_k, start_date, end_date, bool(use_high_quality),
+    )
+    with _RESULT_CACHE_LOCK:
+        cache_key += (_INDEX_GENERATION,)
+        cached = _RESULT_CACHE.get(cache_key)
+        if cached is not None:
+            _RESULT_CACHE.move_to_end(cache_key)
+            LOGGER.info("Search served from result cache.")
+            return cached.copy()
+
+    result_df = _run_search(query_packed, configs, top_k, start_date, end_date,
+                            use_high_quality, query_float)
+
+    with _RESULT_CACHE_LOCK:
+        if cache_key[-1] == _INDEX_GENERATION and not result_df.empty:
+            _RESULT_CACHE[cache_key] = result_df.copy()
+            while len(_RESULT_CACHE) > _RESULT_CACHE_MAX:
+                _RESULT_CACHE.popitem(last=False)
+    return result_df
+
+
+def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_quality, query_float):
+    """The uncached search behind combined_search_orchestrator."""
     sources_map = {
         name: cfg
         for name, cfg in zip(_SOURCE_NAMES, configs)
