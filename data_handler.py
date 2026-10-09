@@ -25,6 +25,7 @@ _PARQUET_DATASET_CACHE: dict = {}
 _WISHLIST = frozenset({
     "title", "abstract", "date", "doi", "authors",
     "journal", "server", "journal-ref", "published", "posted", "update_date",
+    "pmid", "type", "version",
 })
 
 

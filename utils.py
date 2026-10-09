@@ -3,7 +3,6 @@ import time
 import uuid
 import sqlite3
 import logging
-import pandas as pd
 import streamlit as st
 from contextlib import contextmanager
 import doi
@@ -122,32 +121,3 @@ def get_citation_count(doi_str):
         _CITATION_CACHE.clear()
     _CITATION_CACHE[doi_str] = (time.time(), count)
     return count
-
-
-def precalculate_full_text_links_parallel(df):
-    """
-    Computes full-text links for each result row using vectorised string ops.
-    """
-    if df.empty:
-        df["full_text_link"] = None
-        return df
-
-    doi_col = df["doi"].astype(str)
-    source_col = df["source"].str.lower()
-
-    is_arxiv = doi_col.str.contains("arxiv.org", na=False)
-    has_doi = doi_col.str.contains("10.", na=False)
-    is_pubmed = source_col == "pubmed"
-
-    link = pd.Series([None] * len(df), index=df.index, dtype=object)
-
-    # arXiv rows: the doi column already is a full URL
-    link[is_arxiv] = doi_col[is_arxiv]
-    # Non-arXiv rows with a real DOI
-    non_arxiv_doi = ~is_arxiv & has_doi
-    link[non_arxiv_doi] = "https://doi.org/" + doi_col[non_arxiv_doi]
-    # PubMed rows without a DOI get None (already set above via default)
-    link[is_pubmed & ~has_doi] = None
-
-    df["full_text_link"] = link
-    return df

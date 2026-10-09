@@ -4,8 +4,10 @@ import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
 import re
-from utils import get_current_active_users
 import logging
+
+import paper_links
+from utils import get_current_active_users
 
 LOGGER = logging.getLogger(__name__)
 
@@ -286,6 +288,46 @@ def generate_bibtex(df: pd.DataFrame) -> str:
         entries.append(entry)
 
     return "\n".join(entries)
+
+
+def generate_ris(df: pd.DataFrame) -> str:
+    """RIS export (Zotero, EndNote, Mendeley)."""
+    records = []
+    for _, row in df.iterrows():
+        is_preprint = str(row.get("source", "")) in ("BioRxiv", "MedRxiv", "arXiv")
+        lines = [f"TY  - {'UNPB' if is_preprint else 'JOUR'}"]
+        lines.append(f"TI  - {row.get('title', '')}")
+        for author in re.split(r"\s*;\s*", str(row.get("authors") or "")):
+            if author:
+                lines.append(f"AU  - {author}")
+        journal = str(row.get("journal") or "")
+        if journal and journal.lower() not in ("nan", "none"):
+            lines.append(f"JO  - {journal}")
+        year = paper_links.year_of(row)
+        if year:
+            lines.append(f"PY  - {year}")
+        if row.get("date"):
+            lines.append(f"DA  - {str(row['date']).replace('-', '/')}")
+        doi = str(row.get("doi") or "")
+        if doi.startswith("10."):
+            lines.append(f"DO  - {doi}")
+        url = paper_links.primary_link(row)
+        if url:
+            lines.append(f"UR  - {url}")
+        abstract = str(row.get("abstract") or "")
+        if abstract and abstract.lower() != "nan":
+            lines.append(f"AB  - {abstract}")
+        lines.append("ER  - ")
+        records.append("\n".join(lines))
+    return "\n\n".join(records) + "\n"
+
+
+def results_csv(df: pd.DataFrame) -> str:
+    out = df.copy()
+    out["url"] = [paper_links.primary_link(row) for _, row in out.iterrows()]
+    cols = [c for c in ("rank", "title", "authors", "journal", "date", "source", "doi", "pmid",
+                        "url", "citations", "score", "abstract") if c in out.columns]
+    return out[cols].to_csv(index=False)
 
 
 def render_footer():
