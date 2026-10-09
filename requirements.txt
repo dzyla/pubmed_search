@@ -15,3 +15,5 @@ torch==2.11.0
 google-genai==1.62.0
 crossrefapi==1.7.0
 python-doi==0.2.0
+mcp==1.26.0
+httpx==0.28.1

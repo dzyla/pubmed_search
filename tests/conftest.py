@@ -16,6 +16,15 @@ ROWS_PER_FILE = 100
 @pytest.fixture
 def corpus(tmp_path):
     """Six source files of 100 random binary embeddings each, with one parquet per file."""
+    return build_corpus(tmp_path)
+
+
+@pytest.fixture(scope="module")
+def corpus_module(tmp_path_factory):
+    return build_corpus(tmp_path_factory.mktemp("corpus"))
+
+
+def build_corpus(tmp_path):
     rng = np.random.default_rng(0)
     emb_dir = tmp_path / "embed"
     data_dir = tmp_path / "data"
