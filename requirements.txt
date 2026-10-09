@@ -1,0 +1,17 @@
+# App runtime dependencies (versions as installed on the production server, 2026-10-08)
+streamlit==1.55.0
+pandas==2.3.3
+numpy==2.4.3
+pyarrow==23.0.1
+faiss-cpu==1.13.2
+PyYAML==6.0.3
+requests==2.33.0
+plotly==6.6.0
+fastapi==0.135.2
+uvicorn==0.40.0
+pydantic==2.12.5
+sentence-transformers==5.3.0
+torch==2.11.0
+google-genai==1.62.0
+crossrefapi==1.7.0
+python-doi==0.2.0

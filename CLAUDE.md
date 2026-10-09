@@ -59,14 +59,11 @@ Both caches are invalidated when `trigger_database_updates()` detects new embedd
 Uses `google.genai` with `gemini-3-flash-preview` (v1alpha API). Activated in the UI via a toggle + user-supplied Google AI Studio API key. Provides: search result summarization, suggested questions, and a chat interface over the returned abstracts.
 
 ### Database update scripts (`update_database/`)
-Standalone scripts for ingesting new data:
+Standalone ingestion scripts. They are **not** run on the server: a cron job on the lab desktop (GPU) runs them nightly from `~/pubmed_search/snowflake_code/update_database_scripts/`, then rsyncs the new `.npy`/`.parquet` files to the server, where the app picks them up via `trigger_database_updates()`. Paths inside the scripts are hardcoded for that desktop.
 - `pubmed_download_parquet.py` — downloads PubMed XML and converts to parquet
 - `pubmed_embed_bge.py` — generates binary embeddings for PubMed
 - `biorxiv_medarxiv_update_bge.py` — updates BioRxiv/MedRxiv embeddings
-- `arxiv_download_embed_update.py` — updates arXiv embeddings
-
-### Parametric UMAP (`umap_train.py`, `umap_generate.py`, `umap_final.py`)
-PyTorch Lightning–based parametric UMAP for 2D visualization of the embedding space. Uses the local `umap_pytorch/` package. Separate from the live search pipeline — run offline to produce visualization assets.
+- `arxiv_download_embed_update.py` — updates arXiv embeddings (no cron job; run manually)
 
 ## Key design constraints
 
@@ -74,4 +71,4 @@ PyTorch Lightning–based parametric UMAP for 2D visualization of the embedding 
 - FAISS indexes are `IndexBinaryFlat` (Hamming distance), not float L2/IP.
 - Citation counts come from the Crossref API (`crossref.restful`) and are fetched lazily after initial results render to avoid blocking the UI.
 - Session tracking uses a local SQLite file (`sessions_history.db`).
-- The REST API (`search_api.py`) reads valid keys from `api_keys.txt` (one key per line); `#` lines are comments.
+- The REST API (`search_api.py`) reads valid keys from `api_keys.txt` (one key per line); `#` lines are comments. The file is gitignored — never commit it.
