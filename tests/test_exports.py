@@ -30,3 +30,11 @@ def test_csv_has_links():
     header = csv.splitlines()[0]
     assert header.startswith("rank,title,authors")
     assert "https://doi.org/10.1172/JCI103221" in csv
+
+
+def test_author_line_and_abstract_tidying():
+    assert ui_components._authors_short("Chacko, J.; Brar, G.; Premkumar, R.") == "Chacko, J., Brar, G., Premkumar, R."
+    assert ui_components._authors_short("; ".join(f"A{i} B" for i in range(8))).endswith("et al.")
+    assert ui_components.tidy_abstract("BackgroundHydroxychloroquine is used. ResultsWe found") == \
+        "Background: Hydroxychloroquine is used. Results: We found"
+    assert ui_components.tidy_abstract("Methods of DNA repair") == "Methods of DNA repair"
