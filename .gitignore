@@ -13,3 +13,5 @@ dist/
 build/
 .DS_Store
 api_keys.txt
+.env
+.pytest_cache/

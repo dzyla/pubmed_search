@@ -1,0 +1,26 @@
+# Manuscript Search backend: embedding model + search index + REST API + MCP.
+# The only process that loads the index (~2.4 GB) and picks up new data.
+[Unit]
+Description=Manuscript Search backend (search index, REST API, MCP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+WorkingDirectory=/root/pubmed_search
+EnvironmentFile=/root/pubmed_search/.env
+Environment=PATH=/root/space_env/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/space_env/bin/python search_api.py
+Restart=always
+RestartSec=5
+# Index + model + headroom. A runaway process restarts instead of the kernel
+# OOM-killing nginx or sshd.
+MemoryMax=4G
+OOMScoreAdjust=200
+TimeoutStartSec=600
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

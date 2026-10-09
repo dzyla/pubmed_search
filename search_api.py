@@ -407,7 +407,23 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["X-API-Key", "Content-Type", "Authorization", "Mcp-Session-Id"],
 )
-app.mount("/mcp", _RequireApiKey(_mcp_app))
+
+
+class _McpRoute:
+    """Serves /mcp and /mcp/ alike (no redirect — some MCP clients do not re-POST)."""
+
+    def __init__(self, app, mcp_app):
+        self.app, self.mcp_app = app, mcp_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].rstrip("/") == "/mcp":
+            scope = dict(scope, path="/", raw_path=b"/")
+            await self.mcp_app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_McpRoute, mcp_app=_RequireApiKey(_mcp_app))
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _admin_key_header = APIKeyHeader(name="X-Admin-Secret", auto_error=False)

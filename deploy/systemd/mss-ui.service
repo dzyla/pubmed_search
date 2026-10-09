@@ -1,0 +1,22 @@
+# Manuscript Search web UI (Streamlit). A thin client of mss-backend: no model,
+# no index, so it needs little memory and restarts in seconds.
+[Unit]
+Description=Manuscript Search web UI (Streamlit)
+After=mss-backend.service
+Wants=mss-backend.service
+
+[Service]
+User=root
+WorkingDirectory=/root/pubmed_search
+EnvironmentFile=/root/pubmed_search/.env
+Environment=PATH=/root/space_env/bin:/usr/bin:/bin
+ExecStart=/root/space_env/bin/streamlit run pbmss_app.py --server.address 127.0.0.1 --server.port 8501 --server.enableCORS false
+Restart=always
+RestartSec=5
+MemoryMax=1G
+OOMScoreAdjust=300
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

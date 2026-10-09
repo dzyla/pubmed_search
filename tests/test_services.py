@@ -174,6 +174,13 @@ def test_mcp_accepts_bearer_token(backend):
     assert _rpc(client, "tools/list", headers=headers).status_code == 200
 
 
+def test_mcp_path_without_trailing_slash(backend):
+    client, _ = backend
+    r = client.post("/mcp", headers=MCP_HEADERS, follow_redirects=False,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    assert r.status_code == 200 and r.json()["result"]["tools"]
+
+
 # ---------------------------------------------------------------------------
 # Active-user counter
 # ---------------------------------------------------------------------------

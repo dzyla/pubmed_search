@@ -1,0 +1,9 @@
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+api_keys.txt
+*.db
+*.sqlite3
+eval/

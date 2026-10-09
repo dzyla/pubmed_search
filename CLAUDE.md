@@ -1,81 +1,64 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code in this repository.
 
-## What this project is
+## What this is
 
-PubMed Manuscript Semantic Search (MSS) — a biomedical literature search engine over PubMed, BioRxiv, MedRxiv, and arXiv. Queries are encoded into binary embeddings and searched against FAISS binary indexes built from chunked memory-mapped .npy files. Results are displayed in a Streamlit UI with optional Google Gemini AI summaries and chat.
+Manuscript Search (manuscript-search.org): semantic search over ~49M abstracts
+(PubMed, bioRxiv, medRxiv, arXiv). Queries are embedded with BAAI/bge-small-en-v1.5,
+binarized to 384 bits, searched with FAISS `IndexBinaryFlat` over chunked memmapped
+`.npy` files, re-ranked with the float query, and joined to parquet metadata.
 
-## Running the services
+## Architecture (two processes)
 
-There are three independent processes; all three must be running for the Streamlit UI to work:
-
-```bash
-# 1. Embedding server (port 8000) — must start first
-python model_api.py
-
-# 2. Streamlit UI
-streamlit run pbmss_app.py
-# or with a custom config:
-streamlit run pbmss_app.py -- --config ./config_mss.yaml
-
-# 3. REST search API (port 8080) — optional, for programmatic access
-uvicorn search_api:app --host 0.0.0.0 --port 8080
-```
-
-## Tests
+- `search_api.py` — **the backend**. Loads the model (`embedder.py`) and the index
+  once; serves REST (`/search`, `/v1/search`, `/v1/stats`, `/health`) and MCP (`/mcp`,
+  tools from `mcp_server.py`); limits concurrent searches; the only process that picks
+  up new embedding files (startup + hourly). Keys: `api_keys.txt` (public tier,
+  ≤10 results, ≤2000 chars) and `MSS_INTERNAL_KEY` (UI tier, ≤50 results).
+- `pbmss_app.py` — Streamlit UI, a thin client via `backend_client.py`. Never import
+  `search_logic` from the UI: that would load a second index copy (~2.4 GB).
 
 ```bash
-python -m pytest tests/
+MSS_INTERNAL_KEY=dev python search_api.py            # :8080
+MSS_INTERNAL_KEY=dev streamlit run pbmss_app.py      # :8501
+python -m pytest tests/                              # synthetic data, no network
 ```
-Tests build a small synthetic corpus in a temp dir (no real data, model server, or network needed). Use the `pubmed_search` conda env locally (same streamlit/pandas versions as the server).
+Use the `pubmed_search` conda env locally (same streamlit/pandas/faiss as the server).
 
-## Architecture
+## Search pipeline (`search_logic.py`)
 
-### Three-process design
-- **`model_api.py`** — FastAPI server (port 8000). Loads `BAAI/bge-small-en-v1.5` via SentenceTransformers, encodes a query string to a binary-quantized uint8 numpy array (384 float dims → 48 bytes).
-- **`pbmss_app.py`** — Streamlit frontend. Calls the embedding server via `api_handler.py`, runs `search_logic.combined_search_orchestrator`, and renders results.
-- **`search_api.py`** — FastAPI REST API (port 8080). Wraps the same search logic for programmatic access; authenticates via API keys in `api_keys.txt`.
+1. Per source, `ChunkedSearcher` builds/caches FAISS indexes per chunk file.
+2. Per chunk: Hamming top-k (5,000; 20,000 with a date filter), then
+   `rescore_with_float_query` (lookup-table dot product of float query vs ±1 bits).
+3. Global sort, then batches: date filters screen candidates on the `date` column only;
+   full rows fetched via `data_handler.fetch_specific_rows`; `_add_or_merge` dedups by
+   DOI/title and merges preprints with journal versions (published DOI or title).
+4. LRU result cache keyed by query + filters + index generation.
 
-### Search pipeline (`search_logic.py`)
-1. `api_handler.get_query_embedding_packed()` → POST to `:8000/encode` → uint8 numpy array
-2. `combined_search_orchestrator()` fans out across all four sources in parallel
-3. Each source uses a `ChunkedSearcher` (cached at module level) which manages:
-   - Chunked memory-mapped `.npy` files containing binary embeddings
-   - FAISS `IndexBinaryFlat` indexes (also cached at module level)
-   - Mapping from FAISS hit IDs back to source parquet rows via sorted interval tables
-4. `data_handler.fetch_specific_rows()` reads metadata (title, abstract, DOI, date, authors) from parquet files using PyArrow
+## Constraints that matter
 
-### Configuration (`config_mss.yaml`)
-Four stanzas — `pubmed_config`, `biorxiv_config`, `medrxiv_config`, `arxiv_config` — each specifying:
-- `embeddings_directory` — raw `.npy` embedding files
-- `chunk_dir` — chunked memory-mapped files (built automatically on first run)
-- `metadata_path` — JSON file with chunk layout and `total_rows`
-- `data_folder` — parquet files with paper metadata
+- **Server**: 4 vCPU, 7.8 GB RAM, no GPU. Every 1M docs = 48 MB RAM. Never add work
+  that loads a second index or re-embeds on the server.
+- **Don't trigger needless recomputation**: changing a source `.npy` mtime makes the
+  backend rebuild that source's chunks; extending the last chunk must only evict that
+  chunk's index.
+- PubMed vectors were embedded **with** the BGE query prefix, the other sources
+  without (`eval/README.md`); the measured effect on ranking is negligible.
+- bioRxiv/medRxiv: row i of the combined parquet ↔ row i of the `.npy`. A row-count
+  mismatch disables the source (`ChunkedSearcher.data_problem`).
+- Parquet should use small row groups (2,000); one huge row group makes every fetch
+  decode the whole file (`tools/rechunk_parquet.py`).
+- Metadata JSON is written atomically (`_write_json_atomic`); keep it that way.
+- All data-derived text rendered with `unsafe_allow_html` must go through
+  `ui_components._e()` / `_safe_url()`.
 
-`config_loader.py` loads this YAML and is decorated with `@st.cache_data` so it's read once per Streamlit session.
+## Data pipeline
 
-### Module-level caches
-`search_logic.py` keeps two in-process caches that survive Streamlit reruns:
-- `_INDEX_CACHE`: `chunk_path → faiss.IndexBinaryFlat` (built on first query, warmed up in background thread at startup)
-- `_SEARCHER_CACHE`: `chunk_dir → ChunkedSearcher`
+`update_database/` scripts run nightly on the lab desktop GPU (cron there, paths
+hardcoded to `/mnt/h/...`), then rsync `.npy` + `.parquet` to the server.
 
-Both caches are invalidated when `trigger_database_updates()` detects new embedding files.
+## Deploy
 
-### AI features (`gemini_handler.py`)
-Uses `google.genai` with `gemini-3-flash-preview` (v1alpha API). Activated in the UI via a toggle + user-supplied Google AI Studio API key. Provides: search result summarization, suggested questions, and a chat interface over the returned abstracts.
-
-### Database update scripts (`update_database/`)
-Standalone ingestion scripts. They are **not** run on the server: a cron job on the lab desktop (GPU) runs them nightly from `~/pubmed_search/snowflake_code/update_database_scripts/`, then rsyncs the new `.npy`/`.parquet` files to the server, where the app picks them up via `trigger_database_updates()`. Paths inside the scripts are hardcoded for that desktop.
-- `pubmed_download_parquet.py` — downloads PubMed XML and converts to parquet
-- `pubmed_embed_bge.py` — generates binary embeddings for PubMed
-- `biorxiv_medarxiv_update_bge.py` — updates BioRxiv/MedRxiv embeddings
-- `arxiv_download_embed_update.py` — updates arXiv embeddings (no cron job; run manually)
-
-## Key design constraints
-
-- Embeddings are **binary-quantized** (384 float → 48 uint8 bytes via `np.packbits`). The BGE query prefix `"Represent this sentence for searching relevant passages: "` must be prepended before encoding; this is done server-side in `model_api.py`.
-- FAISS indexes are `IndexBinaryFlat` (Hamming distance), not float L2/IP.
-- Citation counts come from the Crossref API (`crossref.restful`) and are fetched lazily after initial results render to avoid blocking the UI.
-- Session tracking uses a local SQLite file (`sessions_history.db`).
-- The REST API (`search_api.py`) reads valid keys from `api_keys.txt` (one key per line); `#` lines are comments. The file is gitignored — never commit it.
+`deploy/push.sh` (local) then `deploy/install.sh` on the server (`--rollback` to undo).
+`api_keys.txt` and `.env` live only on the server and are never committed.
