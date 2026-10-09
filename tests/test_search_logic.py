@@ -248,3 +248,37 @@ def test_two_journal_articles_with_same_title_stay_separate():
     title = "A long enough title that two different journal articles share by chance"
     kept = _dedup([_row("10.1/a", 0.9, title=title), _row("10.1/b", 0.8, title=title)])
     assert len(kept) == 2
+
+
+# ---------------------------------------------------------------------------
+# Combined-file alignment guard
+# ---------------------------------------------------------------------------
+
+def _combined_corpus(tmp_path, n_emb, n_rows):
+    emb_dir = tmp_path / "embed"
+    emb_dir.mkdir()
+    np.save(emb_dir / "biorxiv_binary_bge.npy",
+            np.random.default_rng(0).integers(0, 256, (n_emb, EMB_BYTES), dtype=np.uint8))
+    combined = tmp_path / "meta.parquet"
+    pd.DataFrame({"title": [f"P{i}" for i in range(n_rows)], "abstract": ["x" * 100] * n_rows,
+                  "doi": [f"10.1101/{i}" for i in range(n_rows)], "date": ["2020-01-01"] * n_rows,
+                  "server": ["biorxiv"] * n_rows}).to_parquet(combined)
+    return {"embeddings_directory": str(emb_dir), "npy_files_pattern": "*.npy",
+            "chunk_dir": str(tmp_path / "chunks") + "/", "metadata_path": str(tmp_path / "meta.json"),
+            "data_folder": str(emb_dir), "combined_data_file": str(combined), "chunk_size_bytes": 1 << 20}
+
+
+def test_misaligned_combined_file_disables_source(tmp_path):
+    config = _combined_corpus(tmp_path, n_emb=120, n_rows=100)
+    searcher = search_logic.get_or_create_searcher(config)
+    assert searcher.data_problem and "100 rows" in searcher.data_problem
+    query = np.zeros((1, EMB_BYTES), dtype=np.uint8)
+    assert search_logic._run_search(query, [{}, config, {}, {}], 10, None, None, True, None).empty
+
+
+def test_aligned_combined_file_is_searched(tmp_path):
+    config = _combined_corpus(tmp_path, n_emb=100, n_rows=100)
+    assert search_logic.get_or_create_searcher(config).data_problem is None
+    query = np.zeros((1, EMB_BYTES), dtype=np.uint8)
+    df = search_logic._run_search(query, [{}, config, {}, {}], 10, None, None, True, None)
+    assert len(df) == 10 and (df["source"] == "BioRxiv").all()

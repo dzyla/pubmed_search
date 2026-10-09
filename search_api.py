@@ -48,7 +48,9 @@ import embedder
 import paper_links
 from config_loader import read_source_configs
 from mcp_server import SOURCES, SearchFailed, build_mcp
-from search_logic import combined_search_orchestrator, trigger_database_updates, warm_up_indexes
+from search_logic import (
+    _SEARCHER_CACHE, combined_search_orchestrator, trigger_database_updates, warm_up_indexes,
+)
 from utils import get_clean_doi
 
 # ---------------------------------------------------------------------------
@@ -285,6 +287,10 @@ def _compute_stats() -> dict:
             info["updated"] = datetime.fromtimestamp(os.path.getmtime(meta_path), timezone.utc).date().isoformat()
         except Exception:
             pass
+        searcher = _SEARCHER_CACHE.get(cfg.get("chunk_dir"))
+        if searcher is not None and searcher.data_problem:
+            info["available"] = False
+            info["problem"] = searcher.data_problem
         if name in ("BioRxiv", "MedRxiv"):
             fetched = report_dates_from_metadata(cfg)
             if fetched and fetched != "N/A":
