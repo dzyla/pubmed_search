@@ -204,7 +204,7 @@ if not final_results.empty:
     results["citations"] = st.session_state["citations"] if citations_ready else [None] * len(results)
 
     head_l, head_r = st.columns([1.4, 1], vertical_alignment="bottom")
-    head_l.markdown(f"### {len(results)} papers")
+    head_l.markdown(f"### {len(results)} results")
     sort_option = head_r.segmented_control(
         "Sort by", ["Relevance", "Newest", "Most cited"], default="Relevance",
         key="sort_option", label_visibility="collapsed",

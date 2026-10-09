@@ -223,7 +223,14 @@ def render_entry(row, rank: int, citations, top_score: float):
     journal = _e(row.get("journal"))
     journal = "" if journal in ("N/A", "nan") else _SERVER_NAMES.get(journal.lower(), journal)
     when = _e(row.get("date"))
-    cite = " ".join(p for p in (
+    if str(row.get("source")) == "ClinicalTrials":
+        nct = _e(row.get("nct_id")) or (_e(row.get("url", "")).rsplit("/", 1)[-1])
+        sponsor = _e(row.get("authors"))
+        cite = (f"{sponsor + '. ' if sponsor and sponsor != 'N/A' else ''}<em>ClinicalTrials.gov</em> "
+                f"{nct}{', registered ' + when if when else ''}.")
+    else:
+        cite = None
+    cite = cite or " ".join(p for p in (
         _e(_authors_short(row.get("authors"))),
         f"<em>{journal}</em>," if journal and when else (f"<em>{journal}</em>." if journal else ""),
         f"{when}." if when else "",
