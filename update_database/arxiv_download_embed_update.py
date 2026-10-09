@@ -371,7 +371,7 @@ def save_chunk(rows, folder, run_id, chunk_num):
 
     filename = f"arxiv_update_{run_id}_chunk_{chunk_num}.parquet"
     path = os.path.join(folder, filename)
-    df.to_parquet(path, engine='pyarrow', compression=valid_comp, index=False)
+    df.to_parquet(path, engine='pyarrow', compression=valid_comp, index=False, row_group_size=2000)
     print(f"Saved: {filename}")
 
 def incremental_process_json(json_file, output_folder, existing_ids):
