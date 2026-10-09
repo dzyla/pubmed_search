@@ -305,7 +305,8 @@ class ChunkedSearcher:
             found[m] = True
         return out, found
 
-    def exact_candidates(self, token_hashes: dict, query_float=None, query_packed=None) -> list:
+    def exact_candidates(self, token_hashes: dict, query_float=None, query_packed=None,
+                         boost: float = None) -> list:
         """
         Documents containing the query's identifier tokens, scored like semantic
         candidates (float-query rescoring of their stored codes) plus a boost
@@ -339,7 +340,8 @@ class ChunkedSearcher:
             scores = 1.0 - np.unpackbits(codes ^ np.asarray(query_packed).reshape(1, -1), axis=1).sum(1) / (codes.shape[1] * 8)
         # Share of the query's indexed identifiers (common words are not indexed).
         share = hits.sum(axis=1) / len(per_token)
-        boost = np.where(share >= 1.0, EXACT_BOOST, EXACT_BOOST * 0.5 * share)
+        full = EXACT_BOOST if boost is None else boost
+        boost = np.where(share >= 1.0, full, full * 0.5 * share)
         tokens = list(per_token)
         return [
             {"corpus_id": int(g), "score": float(sc + b),
@@ -1177,6 +1179,11 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     """The uncached search behind combined_search_orchestrator."""
     tokens = sorted(identifier_tokens(query_text))[:MAX_QUERY_IDENTIFIERS] if query_text else []
     token_hashes = {t: token_hash(t) for t in tokens}
+    # A query that is nothing but identifiers ("TMEM175", "rs429358 APOE") asks for
+    # documents containing them: double boost.
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", query_text or "")
+    exact_boost = EXACT_BOOST * (2 if tokens and words and all(
+        w.replace("-", "").lower() in tokens for w in words) else 1)
     sources_map = {
         name: cfg
         for name, cfg in zip(_SOURCE_NAMES, configs)
@@ -1202,7 +1209,7 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         )
         if token_hashes:
             by_id = {c["corpus_id"]: c for c in candidates}
-            for e in searcher.exact_candidates(token_hashes, query_float, query_packed):
+            for e in searcher.exact_candidates(token_hashes, query_float, query_packed, exact_boost):
                 c = by_id.get(e["corpus_id"])
                 if c is None:
                     candidates.append(e)

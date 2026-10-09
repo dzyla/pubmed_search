@@ -40,3 +40,24 @@ python eval/ranking_eval.py \
   --queries ~/pubmed_search/snowflake_code/pubmed_synthetic_queries_10k.parquet
 ```
 ~5 min on an RTX 5080 (most of it re-embedding the no-prefix distractors).
+
+## Exact-term (identifier) matching — calibration, 2026-10-09
+
+40 real PubMed files (~650k papers), real BGE model, top-10 results that
+literally contain the query's identifier. Superseded-version filtering was
+switched off for this subset only (the newest versions of its records live in
+files outside the subset).
+
+| Query | Papers containing it | Semantic only | Hybrid (boost 0.08, ×2 for identifier-only queries) |
+|---|---|---|---|
+| `TMEM175` | 15 | 1/10 | **9/10** |
+| `TMEM175 lysosomal potassium channel in Parkinson disease` | 15 | 2/10 | **8/10** |
+| `rs429358` | 17 | 0/10 | **10/10** |
+| `APOE rs429358 and Alzheimer disease risk` | 17 | 0/10 | **9/10** |
+| `BMS-986165` | 1 | 0 | **ranked #1** |
+| `NCT04368728` | 1 | 0 | **ranked #1** |
+| `KRAS G12C inhibitor resistance` | 190 | 9/10 | 10/10 |
+| two questions without identifiers | — | unchanged | unchanged |
+
+Index (all sources): 9.4M identifiers, 113M postings, ~0.8 GB on disk,
+memory-mapped on the server; built nightly on the desktop in ~15 min.
