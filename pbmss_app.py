@@ -56,34 +56,50 @@ ui_components.render_header(corpus_stats(), ui_data.get_current_active_users())
 # Chat fragment (re-runs independently of the page)
 # ---------------------------------------------------------------------------
 
+_AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
+
+
 @st.fragment
 def render_chat_interface(results, ai):
-    if st.session_state.get("ai_questions"):
-        st.caption("Suggested questions")
-        for i, q in enumerate(st.session_state["ai_questions"]):
-            if st.button(q, key=f"sug_q_{i}"):
-                st.session_state.chat_history.append({"role": "user", "content": q})
-                st.rerun(scope="fragment")
-
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("Ask about these papers"):
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-    # Answer the last user turn if it has no reply yet — covers both a typed
-    # prompt and a suggested-question click (which only appends and reruns).
+    """A chat panel: the conversation scrolls in a fixed-height box, the question box sits below it."""
     history = st.session_state.chat_history
-    if history and history[-1]["role"] == "user":
-        with st.chat_message("assistant"):
-            with st.spinner("Reading the abstracts…"):
-                response_text = ai_assistant.chat_with_context(
-                    history, results, ai["provider"], ai["key"], ai["model"])
-                st.markdown(response_text)
-                st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+    label = ai_assistant.PROVIDERS[ai["provider"]].label
+
+    if history:
+        _, reset = st.columns([5, 1])
+        if reset.button("New chat", type="tertiary", icon=":material/refresh:", key="chat_reset",
+                        width="stretch"):
+            history.clear()
+            st.rerun(scope="fragment")
+
+    with st.container(height=560 if history else "content", border=bool(history), key="chat_box"):
+        if not history:
+            st.markdown(f"Ask anything about the top {min(15, len(results))} results. Answers come from "
+                        f"{label} ({ai['model']}), based only on these abstracts, and cite them by number.")
+        for message in history:
+            with st.chat_message(message["role"], avatar=_AVATARS.get(message["role"])):
+                st.markdown(message["content"])
+        # Answer the last question if it has no reply yet (typed or a suggested question)
+        if history and history[-1]["role"] == "user":
+            with st.chat_message("assistant", avatar=_AVATARS["assistant"]):
+                with st.spinner("Reading the abstracts…"):
+                    answer = ai_assistant.chat_with_context(history, results, ai["provider"], ai["key"], ai["model"])
+                st.markdown(answer)
+            history.append({"role": "assistant", "content": answer})
+
+    suggestions = [q for q in st.session_state.get("ai_questions") or []
+                   if q not in {m["content"] for m in history}]
+    if suggestions:
+        picked = st.pills("Suggested questions", suggestions, key=f"chat_suggest_{len(history)}",
+                          label_visibility="collapsed")
+        if picked:
+            history.append({"role": "user", "content": picked})
+            st.rerun(scope="fragment")
+
+    prompt = st.chat_input("Ask about these papers", key="chat_prompt")
+    if prompt:
+        history.append({"role": "user", "content": prompt})
+        st.rerun(scope="fragment")
 
 
 # ---------------------------------------------------------------------------
