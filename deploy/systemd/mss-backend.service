@@ -16,7 +16,8 @@ Restart=always
 RestartSec=5
 # Index + model + headroom. A runaway process restarts instead of the kernel
 # OOM-killing nginx or sshd.
-MemoryMax=4G
+# Steady state ~3.4 GB; restarts warm up all databases and the map and peak near 4.3 GB
+MemoryMax=5G
 OOMScoreAdjust=200
 TimeoutStartSec=600
 NoNewPrivileges=true
