@@ -243,6 +243,27 @@ def write_chunk(rows: list, df_dir: str, emb_dir: str, n: int):
     print(f"  wrote {stem}: {len(df):,} abstracts")
 
 
+def another_run_active() -> bool:
+    """True if another openalex_update.py process is running (lock file, or any older run)."""
+    import fcntl
+    global _LOCK
+    _LOCK = open(os.path.expanduser("~/.openalex_update.lock"), "w")
+    try:
+        fcntl.flock(_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    me = {os.getpid(), os.getppid()}
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if int(pid) not in me and cmd and cmd[0].endswith(b"python") and any(
+                a.endswith(b"openalex_update.py") for a in cmd[1:]):
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default=DEFAULT_BASE)
@@ -250,6 +271,9 @@ def main():
     ap.add_argument("--first-year", type=int, default=FIRST_YEAR)
     ap.add_argument("--dry-run", action="store_true", help="fetch and clean, write nothing")
     args = ap.parse_args()
+    if another_run_active():
+        print("Another OpenAlex harvest is running — exiting.")
+        return
     key = api_key()
     df_dir, emb_dir = os.path.join(args.base, "openalex_df"), os.path.join(args.base, "openalex_embed")
     coord = os.path.join(args.base, "openalex_coordination")
