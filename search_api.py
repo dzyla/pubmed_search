@@ -837,6 +837,16 @@ async def map_static(name: str):
                         headers={"Cache-Control": "public, max-age=604800"})
 
 
+@app.get("/map/preview.jpg", include_in_schema=False)
+async def map_preview():
+    """Wide still of the map for the landing page."""
+    m = _require_map()
+    path = os.path.join(m.path, "preview.jpg")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/map/tiles/{version}/{z}/{x}/{y}.png", include_in_schema=False)
 async def map_tile(version: str, z: int, x: int, y: int):
     m = _require_map()

@@ -7,6 +7,8 @@ import json
 import math
 import os
 
+import pandas as pd
+import streamlit as st
 import streamlit.components.v1 as components
 
 from ui_components import EOSIN, INK, SOURCE_COLORS, SOURCE_NAMES
@@ -37,7 +39,7 @@ def _points(results) -> list:
     return pts
 
 
-def render_map(info: dict, results, meta: dict):
+def render_map(info: dict, results, meta: dict, height: int = HEIGHT):
     seeds = [{"xy": _xy(s.get("map_xy")), "title": s.get("title", ""), "url": s.get("url") or ""}
              for s in meta.get("seeds", []) if _xy(s.get("map_xy"))]
     data = {
@@ -51,8 +53,8 @@ def render_map(info: dict, results, meta: dict):
     }
     payload = json.dumps(data).replace("</", "<\\/")
     components.html(_TEMPLATE.replace("__DATA__", payload).replace("__EOSIN__", EOSIN)
-                    .replace("__INK__", INK).replace("__HEIGHT__", str(HEIGHT))
-                    .replace("__BASE__", MAP_BASE_URL), height=HEIGHT + 4)
+                    .replace("__INK__", INK).replace("__HEIGHT__", str(height))
+                    .replace("__BASE__", MAP_BASE_URL), height=height + 4)
 
 
 _TEMPLATE = """<!doctype html>
@@ -199,3 +201,27 @@ legend.onAdd = () => {
 legend.addTo(map);
 </script></body></html>
 """
+
+
+def render_landing_preview(total_papers: int):
+    """The map's doorway on the landing page: a still preview that opens the live map."""
+    count = f"{total_papers / 1e6:.1f} million" if total_papers >= 1e6 else "all"
+    st.markdown(
+        f"""<a class="mss-mapcard" href="?map=1" target="_self" aria-label="Explore the map of all papers">
+        <img src="{MAP_BASE_URL}/map/preview.jpg" alt="" loading="lazy">
+        <span>Explore the map of {count} papers</span></a>
+        <p class="mss-mapnote">Papers on similar topics sit together. Zoom in, and click any spot to see
+        the papers there.</p>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_explore(info: dict):
+    """The live map on its own, before any search."""
+    head, close = st.columns([5, 1], vertical_alignment="bottom")
+    head.markdown("### Map of all papers")
+    close.markdown('<a class="mss-mapclose" href="/" target="_self">Close the map</a>', unsafe_allow_html=True)
+    render_map(info, pd.DataFrame(), {}, height=680)
+    st.caption("Each point of light is a paper, coloured by database; brighter areas hold more papers. "
+               "Zoom in for finer topics, click any spot to see its papers, and from there find papers "
+               "like them. Search above to see where your own question lands.")

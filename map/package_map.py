@@ -79,6 +79,24 @@ def region_labels(xy, meta_terms, k, min_docs, seed=0):
     return out
 
 
+def make_preview(tiles_dir: str, out_path: str, zoom: int = 3, field=(20, 16, 42), width=1400, aspect=2.6):
+    """Wide still of the map for the landing page: tiles of one zoom level on the map's
+    dark background, cropped to a band through the middle (where the papers are)."""
+    from PIL import Image
+    n, size = 2 ** zoom, 256
+    world = Image.new("RGB", (n * size, n * size), field)
+    for x in range(n):
+        for y in range(n):
+            p = os.path.join(tiles_dir, str(zoom), str(x), f"{y}.png")
+            if os.path.exists(p):
+                tile = Image.open(p).convert("RGBA")
+                world.paste(tile, (x * size, y * size), tile)
+    band = int(world.width / aspect)
+    top = (world.height - band) // 2
+    world = world.crop((0, top, world.width, top + band)).resize((width, int(width / aspect)), Image.LANCZOS)
+    world.save(out_path, "JPEG", quality=82, optimize=True, progressive=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work", default="/mnt/h/pubmed_semantic_search/umap_work")
@@ -116,6 +134,7 @@ def main():
     out = os.path.join(root, version)
     os.makedirs(out)
     shutil.copytree(os.path.join(args.work, args.map_dir, "tiles"), os.path.join(out, "tiles"))
+    make_preview(os.path.join(out, "tiles"), os.path.join(out, "preview.jpg"))
     np.save(os.path.join(out, "ref_codes.npy"), np.ascontiguousarray(codes, dtype=np.uint8))
     np.save(os.path.join(out, "ref_xy.npy"), xy)
     np.save(os.path.join(out, "ref_file.npy"), ref_file)

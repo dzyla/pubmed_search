@@ -97,6 +97,20 @@ _CSS = f"""
   .mss-abstract {{ font-family: "Newsreader", serif; font-size: 1.02rem; line-height: 1.65;
                   color: {INK}; max-width: 40rem; }}
 
+  /* The map's doorway on the landing page */
+  .mss-mapcard {{ position: relative; display: block; margin: 2.2rem 0 0.4rem 0; border-radius: 6px;
+                 overflow: hidden; background: #14102A; text-decoration: none !important; }}
+  .mss-mapcard img {{ display: block; width: 100%; aspect-ratio: 2.6; object-fit: cover;
+                     transition: transform 0.6s ease, filter 0.6s ease; filter: brightness(0.92); }}
+  .mss-mapcard:hover img, .mss-mapcard:focus-visible img {{ transform: scale(1.025); filter: brightness(1.05); }}
+  .mss-mapcard span {{ position: absolute; left: 1.1rem; bottom: 0.9rem; color: #fff;
+                      font-family: "Newsreader", serif; font-size: 1.35rem; font-style: italic;
+                      text-shadow: 0 1px 8px rgba(0,0,0,0.75); }}
+  .mss-mapcard:focus-visible {{ outline: 2px solid {EOSIN}; outline-offset: 3px; }}
+  .mss-mapnote {{ font-size: 0.85rem; color: {MUTED}; margin: 0; }}
+  .mss-mapclose {{ display: block; text-align: right; font-size: 0.88rem; padding-bottom: 0.7rem; }}
+  @media (prefers-reduced-motion: reduce) {{ .mss-mapcard img {{ transition: none; }} }}
+
   .mss-foot {{ font-size: 0.82rem; color: {MUTED}; line-height: 1.6; margin-top: 2.5rem;
               padding-top: 1rem; border-top: 1px solid {RULE}; }}
   .mss-foot a {{ font-weight: 500; }}
