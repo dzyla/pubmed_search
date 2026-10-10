@@ -823,6 +823,18 @@ def _nearby_papers(found: list, k: int) -> list:
     return papers
 
 
+# Leaflet, vendored (map/static): the site's CSP allows scripts from this origin only
+_MAP_STATIC = {"leaflet.js": "text/javascript", "leaflet.css": "text/css"}
+
+
+@app.get("/map/static/{name}", include_in_schema=False)
+async def map_static(name: str):
+    if name not in _MAP_STATIC:
+        raise HTTPException(status_code=404)
+    return FileResponse(os.path.join(_HERE, "map", "static", name), media_type=_MAP_STATIC[name],
+                        headers={"Cache-Control": "public, max-age=604800"})
+
+
 @app.get("/map/tiles/{version}/{z}/{x}/{y}.png", include_in_schema=False)
 async def map_tile(version: str, z: int, x: int, y: int):
     m = _require_map()
