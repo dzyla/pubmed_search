@@ -88,7 +88,7 @@ restore if `nginx -t` fails.
 | `mcp_server.py`, `mcp_stdio.py` | MCP tools; stdio bridge |
 | `paper_links.py` | Links and labels per paper (shared by UI and API) |
 | `pbmss_app.py`, `ui_components.py`, `ui_data.py`, `backend_client.py`, `.streamlit/` | Web UI |
-| `gemini_handler.py` | Optional AI summary / chat with the user's own Gemini key |
+| `ai_assistant.py` | Optional AI summary / chat with the user's own key: Google Gemini, Anthropic, OpenAI, OpenRouter, Groq, Mistral, DeepSeek |
 | `update_database/` | Ingestion scripts (run on the GPU desktop) |
 | `tools/rechunk_parquet.py` | Rewrite metadata parquet with small row groups |
 | `eval/` | Offline ranking evaluation |
