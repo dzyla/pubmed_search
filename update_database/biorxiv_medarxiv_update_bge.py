@@ -181,8 +181,14 @@ def fetch_block(endpoint, server, block_start, block_end, save_directory):
     end_yymmdd   = block_end.strftime("%y%m%d")
     existing_file = os.path.join(save_directory, f"{endpoint}_data_{start_yymmdd}_{end_yymmdd}.json")
     if os.path.exists(existing_file):
-        print(f"Skipping {server} {block_start.date()} → {block_end.date()} (already on disk).")
-        return True
+        try:                       # a run that died mid-write (e.g. disk full) leaves a broken file
+            with open(existing_file) as f:
+                json.load(f)
+            print(f"Skipping {server} {block_start.date()} → {block_end.date()} (already on disk).")
+            return True
+        except (ValueError, OSError):
+            print(f"Re-fetching {server} {block_start.date()} → {block_end.date()} (file on disk is incomplete).")
+            os.remove(existing_file)
 
     block_interval = f"{block_start.strftime('%Y-%m-%d')}/{block_end.strftime('%Y-%m-%d')}"
     block_data = []
@@ -228,13 +234,15 @@ def fetch_block(endpoint, server, block_start, block_end, save_directory):
     return False
 
 def convert_json_to_parquet(json_dir, parquet_dir):
+    """Returns (parquet files, number of JSON files that could not be read)."""
     json_files = list(Path(json_dir).glob("*.json"))
     if not json_files:
-        return []
+        return [], 0
 
     print(f"Converting {len(json_files)} JSON files to Parquet...")
     parquet_files = []
-    
+    failures = 0
+
     for json_file in json_files:
         try:
             with open(json_file, 'r') as file:
@@ -262,8 +270,13 @@ def convert_json_to_parquet(json_dir, parquet_dir):
             parquet_files.append(out_path)
         except Exception as e:
             print(f"Error converting {json_file.name}: {e}")
-            
-    return parquet_files
+            failures += 1
+            try:                   # unreadable: drop it so the next run fetches that block again
+                json_file.unlink()
+            except OSError:
+                pass
+
+    return parquet_files, failures
 
 # -----------------------------------------------------------------------------
 # 4. PROCESSING & INTEGRITY LOGIC
@@ -451,7 +464,13 @@ def process_source(source, model, override_start: datetime | None = None):
         effective_end = end_date
 
     # 3. Convert & Load Incoming
-    incoming_files = convert_json_to_parquet(temp_json_dir, temp_parquet_dir)
+    incoming_files, unreadable = convert_json_to_parquet(temp_json_dir, temp_parquet_dir)
+    if unreadable:
+        # Never move the fetch clock past data we could not read (that once skipped
+        # three weeks of bioRxiv after a disk-full night).
+        print(f"[{name}] ⚠️  {unreadable} downloaded file(s) were unreadable — state not advanced.")
+        effective_end = None
+        failed_blocks = failed_blocks or [start_date]
 
     if not incoming_files:
         print(f"[{name}] No new data found/converted.")

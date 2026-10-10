@@ -34,3 +34,13 @@ def test_integrity_check_repairs_a_shifted_block(tmp_path):
     u.check_database_integrity(meta, emb, model, sample=50, recent=200)   # newest 200 rows cover the block: deterministic
     assert (np.load(emb) == good).all()
     assert len(pd.read_parquet(meta)) == 300
+
+
+def test_unreadable_downloads_are_counted_and_removed(tmp_path):
+    (tmp_path / "json").mkdir()
+    (tmp_path / "pq").mkdir()
+    (tmp_path / "json" / "details_data_a.json").write_text('[{"title": "ok", "abstract": "x"}]')
+    (tmp_path / "json" / "details_data_b.json").write_text('[{"title": "cut off by a full dis')
+    files, unreadable = u.convert_json_to_parquet(str(tmp_path / "json"), str(tmp_path / "pq"))
+    assert len(files) == 1 and unreadable == 1
+    assert not (tmp_path / "json" / "details_data_b.json").exists()
