@@ -213,6 +213,7 @@ if submitted and query and not sources:
 elif submitted and query:
     st.session_state["view"] = "search"
     st.query_params.pop("similar", None)
+    st.query_params.pop("map", None)
 
     # Shareable URL for this search (long pasted abstracts are left out of the URL)
     if len(query) <= 2000:
@@ -272,6 +273,14 @@ final_results = st.session_state.get("final_results", pd.DataFrame())
 # ---------------------------------------------------------------------------
 # Phase 2: display
 # ---------------------------------------------------------------------------
+
+# Before any search: the map of all papers (a preview, or the live map with ?map=1)
+if final_results.empty and not similar_refs:
+    landing_map = cached_map_info()
+    if landing_map and st.query_params.get("map"):
+        map_view.render_explore(landing_map)
+    elif landing_map:
+        map_view.render_landing_preview(corpus_stats().get("total_papers", 0))
 
 if not final_results.empty:
     meta = st.session_state.get("search_meta", {})
