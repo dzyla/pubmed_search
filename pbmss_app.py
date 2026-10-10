@@ -25,7 +25,7 @@ import re
 
 import backend_client
 import map_view
-import gemini_handler
+import ai_assistant
 import ui_components
 import ui_data
 
@@ -57,7 +57,7 @@ ui_components.render_header(corpus_stats(), ui_data.get_current_active_users())
 # ---------------------------------------------------------------------------
 
 @st.fragment
-def render_chat_interface(results, ai_api_key):
+def render_chat_interface(results, ai):
     if st.session_state.get("ai_questions"):
         st.caption("Suggested questions")
         for i, q in enumerate(st.session_state["ai_questions"]):
@@ -80,9 +80,8 @@ def render_chat_interface(results, ai_api_key):
     if history and history[-1]["role"] == "user":
         with st.chat_message("assistant"):
             with st.spinner("Reading the abstracts…"):
-                response_text = gemini_handler.chat_with_context(
-                    history, history[-1]["content"], results, ai_api_key
-                )
+                response_text = ai_assistant.chat_with_context(
+                    history, results, ai["provider"], ai["key"], ai["model"])
                 st.markdown(response_text)
                 st.session_state.chat_history.append({"role": "assistant", "content": response_text})
 
@@ -159,16 +158,34 @@ with st.form("search_form", border=False):
 col_t1, col_t2 = st.columns(2)
 col_t2.toggle("Filter by publication date", value=False, key="date_filter_toggle")
 use_ai = col_t1.toggle("AI summary and chat", key="use_ai_checkbox",
-                       help="Uses Google Gemini with your own API key.")
+                       help="Summarise the results and ask questions about them with an AI model, "
+                            "using your own API key (Google, Anthropic, OpenAI, OpenRouter and others).")
+ai = {"provider": "google", "key": "", "model": ""}
 if use_ai:
-    ai_api_key = col_t1.text_input(
-        "Google AI Studio key", type="password",
-        help="Create one at https://aistudio.google.com/apikey",
-    )
-    col_t1.caption("Titles and abstracts of your results are sent to Google Gemini. "
-                   "Your key is used only for this session and is not stored.")
-else:
-    ai_api_key = None
+    with st.container(border=True):
+        a1, a2 = st.columns([1, 1.4])
+        provider_id = a1.selectbox("Provider", list(ai_assistant.PROVIDERS), key="ai_provider",
+                                   format_func=lambda k: ai_assistant.PROVIDERS[k].label)
+        provider = ai_assistant.PROVIDERS[provider_id]
+        api_key = a2.text_input(f"{provider.label} API key", type="password", key=f"ai_key_{provider_id}",
+                                help=f"Create one at {provider.key_url}")
+        # Models this key can use, fetched once per provider and key (kept in this session only)
+        models = [provider.default_model]
+        if api_key:
+            cache = st.session_state.setdefault("ai_models", {})
+            fingerprint = (provider_id, hash(api_key))
+            if fingerprint not in cache:
+                with st.spinner("Loading the models available to this key…"):
+                    cache[fingerprint] = ai_assistant.list_models(provider_id, api_key)
+            models = cache[fingerprint]
+        model = st.selectbox("Model", models, key=f"ai_model_{provider_id}", accept_new_options=True,
+                             help="Pick a model, or type the name of any model your key can use.")
+        st.caption(f"{provider.note + ' ' if provider.note else ''}"
+                   f"[Get a {provider.label} key]({provider.key_url}). Titles and abstracts of your "
+                   f"results are sent to {provider.label}; your key is used only in this session and "
+                   f"is not stored.")
+    ai = {"provider": provider_id, "key": api_key, "model": model or provider.default_model}
+ai_api_key = ai["key"] or None
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +319,8 @@ if not final_results.empty:
         with st.container(border=True):
             st.markdown("#### Summary of the top papers")
             st.markdown(st.session_state["ai_summary"])
-            st.caption("Written by Gemini from the abstracts; numbers refer to the list below.")
+            st.caption(f"Written by {st.session_state.get('ai_summary_by', 'an AI model')} from the abstracts; "
+                       "numbers refer to the list below.")
 
     tab_results, tab_map, tab_time, tab_export, tab_chat = st.tabs(
         ["Papers", "Map", "Timeline", "Export", "Ask the papers"])
@@ -358,13 +376,13 @@ if not final_results.empty:
 
     with tab_chat:
         if not use_ai:
-            st.info("Turn on “AI summary and chat” above and add your Google AI Studio key to ask "
-                    "questions about these papers.")
+            st.info("Turn on “AI summary and chat” above and add an API key (Google, Anthropic, OpenAI, "
+                    "OpenRouter, …) to ask questions about these papers.")
         elif not ai_api_key:
-            st.info("Add your Google AI Studio key above to start.")
+            st.info("Add your API key above to start.")
         else:
             st.session_state.setdefault("chat_history", [])
-            render_chat_interface(final_results, ai_api_key)
+            render_chat_interface(final_results, ai)
 
     # --- Citation counts (Crossref), fetched after the list is on screen ---
     if not citations_ready:
@@ -374,8 +392,11 @@ if not final_results.empty:
 
     # --- AI summary, after citations so the list renders first ---
     if use_ai and ai_api_key and st.session_state.get("ai_summary") is None:
-        with st.spinner("Summarising the top papers with Gemini…"):
-            summary, questions = gemini_handler.analyze_results(final_results, ai_api_key)
+        label = ai_assistant.PROVIDERS[ai["provider"]].label
+        st.session_state["ai_summary_by"] = f"{label} ({ai['model']})"
+        with st.spinner(f"Summarising the top papers with {label}…"):
+            summary, questions = ai_assistant.analyze_results(final_results, ai["provider"], ai["key"],
+                                                              ai["model"])
         st.session_state["ai_summary"] = summary
         st.session_state["ai_questions"] = questions
         st.rerun()
