@@ -390,9 +390,8 @@ def generate_bibtex(df: pd.DataFrame) -> str:
         entry += f"  title = {{{title}}},\n"
         entry += f"  journal = {{{journal}}},\n"
         entry += f"  year = {{{year}}},\n"
-        doi = row.get("doi")
-        if doi and "10." in str(doi):
-            clean = str(doi).strip()
+        clean = paper_links.linkable_doi(row.get("doi"))
+        if clean:
             entry += f"  doi = {{{clean}}},\n"
             entry += f"  url = {{https://doi.org/{clean}}},\n"
         entry += "}\n"
@@ -420,8 +419,8 @@ def generate_ris(df: pd.DataFrame) -> str:
             lines.append(f"PY  - {year}")
         if row.get("date"):
             lines.append(f"DA  - {str(row['date']).replace('-', '/')}")
-        doi = str(row.get("doi") or "")
-        if doi.startswith("10."):
+        doi = paper_links.linkable_doi(row.get("doi"))
+        if doi:
             lines.append(f"DO  - {doi}")
         url = _row_url(row)
         if url:

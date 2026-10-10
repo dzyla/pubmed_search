@@ -39,6 +39,18 @@ def is_retracted(row) -> bool:
             or _clean(row.get("title")).upper().startswith("RETRACTED"))
 
 
+def linkable_doi(doi) -> str:
+    """The DOI if doi.org can resolve it, else ''. Older PubMed records lost the
+    <...> part of SICI DOIs ('...(2002)021<1423:afvots>2.0.co;2') in parsing; those
+    end in 'co;2' without a '<' and lead nowhere."""
+    doi = _clean(doi)
+    if not doi.startswith("10.") or "/" not in doi:
+        return ""
+    if re.search(r"co;2", doi, re.IGNORECASE) and "<" not in doi:
+        return ""
+    return doi
+
+
 def build_links(row) -> list:
     """Returns [(label, url), …]; the first entry is the primary link (or [] if none)."""
     links = []
@@ -62,7 +74,7 @@ def build_links(row) -> list:
     if "arxiv.org" in doi:
         links.append(("arXiv", doi))
         links.append(("PDF", doi.replace("/abs/", "/pdf/")))
-    elif doi:
+    elif linkable_doi(doi):
         links.append(("DOI", f"https://doi.org/{doi}"))
 
     pmcid = _clean(row.get("pmcid"))
