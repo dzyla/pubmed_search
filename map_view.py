@@ -51,14 +51,15 @@ def render_map(info: dict, results, meta: dict):
     }
     payload = json.dumps(data).replace("</", "<\\/")
     components.html(_TEMPLATE.replace("__DATA__", payload).replace("__EOSIN__", EOSIN)
-                    .replace("__INK__", INK).replace("__HEIGHT__", str(HEIGHT)), height=HEIGHT + 4)
+                    .replace("__INK__", INK).replace("__HEIGHT__", str(HEIGHT))
+                    .replace("__BASE__", MAP_BASE_URL), height=HEIGHT + 4)
 
 
 _TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="__BASE__/map/static/leaflet.css">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=Inter:wght@400;500&display=swap">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="__BASE__/map/static/leaflet.js"></script>
 <style>
   :root { --eosin: __EOSIN__; --ink: __INK__; --field: #14102A; --paper: #FBFAFD; --muted: #6D6884; }
   html, body { margin: 0; height: 100%; background: transparent; font-family: Inter, system-ui, sans-serif; }
@@ -155,9 +156,20 @@ if (D.query) {
     html: '<svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3 6.1 20.6l1.3-6.6L2.5 9.4l6.6-.8z" fill="' + getComputedStyle(document.documentElement).getPropertyValue("--eosin") + '" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>'})})
     .bindTooltip(D.seeds.length ? "The examples combined" : "Your query", {direction: "top", offset: [0, -12]}).addTo(map);
 }
-if (placed.length) map.fitBounds(L.latLngBounds(placed).pad(0.35), {maxZoom: 5});
-else map.fitBounds(world);
-showLabels();
+// Streamlit builds the tab while it is hidden (zero size): fit the view once it is shown
+// Leaflet ignores size changes until a view exists, so set one right away
+map.setView(world.getCenter(), 0);
+let fitted = false;
+function fitView() {
+  if (fitted || !document.getElementById("map").clientWidth) return;
+  map.invalidateSize();
+  fitted = true;
+  if (placed.length) map.fitBounds(L.latLngBounds(placed).pad(0.35), {maxZoom: 5});
+  else map.fitBounds(world);
+  showLabels();
+}
+new ResizeObserver(() => { map.invalidateSize(); fitView(); }).observe(document.getElementById("map"));
+fitView();
 
 // what is here? the papers nearest to the clicked point
 map.on("click", e => {

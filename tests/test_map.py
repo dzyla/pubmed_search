@@ -89,3 +89,11 @@ def test_search_results_carry_map_positions(map_backend):
     body = client.post("/search", json={"query": "binary embeddings", "top_k": 5}, headers=INTERNAL).json()
     assert len(body["query_map_xy"]) == 2
     assert all(len(p["map_xy"]) == 2 for p in body["results"])
+
+
+def test_leaflet_is_served_from_this_origin(map_backend):
+    client, _ = map_backend
+    js = client.get("/map/static/leaflet.js")
+    assert js.status_code == 200 and js.text.startswith("/* @preserve") and "javascript" in js.headers["content-type"]
+    assert client.get("/map/static/../search_api.py").status_code == 404
+    assert client.get("/map/static/other.js").status_code == 404
