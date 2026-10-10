@@ -1,43 +1,13 @@
 """Tests for the backend (REST + MCP), the embedder and the session counter.
 No network, no model download: the embedding model is stubbed."""
 import asyncio
-import hashlib
 import sqlite3
 
-import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
-from conftest import EMB_BYTES
+from conftest import EMB_BYTES  # noqa: F401
 
-PUBLIC, INTERNAL = {"X-API-Key": "pub-key"}, {"X-API-Key": "int-key"}
-
-
-def fake_encode(text):
-    seed = int(hashlib.sha256(text.encode()).hexdigest()[:8], 16)
-    vec = np.random.default_rng(seed).standard_normal(EMB_BYTES * 8).astype(np.float32)
-    vec /= np.linalg.norm(vec)
-    return np.packbits(vec > 0)[None, :], vec
-
-
-@pytest.fixture(scope="module")
-def backend(corpus_module, tmp_path_factory):
-    import access
-    import embedder
-    import search_api
-
-    config, _ = corpus_module
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(access, "DB_PATH", str(tmp_path_factory.mktemp("access") / "access.sqlite3"))
-        access.create_key("free", label="test", key="pub-key")
-        mp.setattr(search_api, "API_KEYS_FILE", "/nonexistent/api_keys.txt")
-        mp.setattr(search_api, "CONFIGS", [config, {}, {}, {}])
-        mp.setattr(search_api, "INTERNAL_KEY", "int-key")
-        mp.setattr(embedder, "load_model", lambda: None)
-        mp.setattr(embedder, "is_loaded", lambda: True)
-        mp.setattr(embedder, "encode_query", fake_encode)
-        with TestClient(search_api.app) as client:   # runs the real lifespan
-            yield client, search_api
+from conftest import INTERNAL, PUBLIC, fake_encode  # noqa: F401  (backend fixture lives in conftest)
 
 
 def _search(client, headers=PUBLIC, **body):

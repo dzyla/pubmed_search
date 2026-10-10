@@ -24,6 +24,7 @@ logging.basicConfig(
 import re
 
 import backend_client
+import map_view
 import gemini_handler
 import ui_components
 import ui_data
@@ -41,6 +42,11 @@ ui_components.apply_style()
 @st.cache_data(ttl=300, show_spinner=False)
 def corpus_stats() -> dict:
     return backend_client.stats()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_map_info():
+    return backend_client.map_info()
 
 
 ui_components.render_header(corpus_stats(), ui_data.get_current_active_users())
@@ -297,7 +303,7 @@ if not final_results.empty:
             st.markdown(st.session_state["ai_summary"])
             st.caption("Written by Gemini from the abstracts; numbers refer to the list below.")
 
-    tab_results, tab_export, tab_chat = st.tabs(["Papers", "Export", "Ask the papers"])
+    tab_results, tab_map, tab_export, tab_chat = st.tabs(["Papers", "Map", "Export", "Ask the papers"])
 
     with tab_results:
         top_score = float(final_results["score"].max())
@@ -318,6 +324,16 @@ if not final_results.empty:
         st.markdown("#### Relevance and publication date")
         st.plotly_chart(ui_components.plot_score_vs_year(results), width="stretch",
                         config={"displayModeBar": False})
+
+    with tab_map:
+        map_info = cached_map_info()
+        if not map_info:
+            st.info("The map of all papers is not available right now. Your results are under Papers.")
+        else:
+            map_view.render_map(map_info, results, meta)
+            st.caption("Every paper in the index, laid out so that papers on similar topics sit close "
+                       "together. The star is your query and the numbered pins are your results. Click "
+                       "anywhere to see the papers at that spot.")
 
     with tab_export:
         stamp = datetime.now().strftime("%Y%m%d_%H%M")

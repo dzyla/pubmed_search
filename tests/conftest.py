@@ -2,9 +2,12 @@
 import os
 import sys
 
+import hashlib
+
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,3 +58,39 @@ def build_corpus(tmp_path):
         "chunk_size_bytes": EMB_BYTES * 250,
     }
     return config, np.concatenate(all_emb)
+
+
+PUBLIC, INTERNAL = {"X-API-Key": "pub-key"}, {"X-API-Key": "int-key"}
+
+
+def fake_encode(text):
+    seed = int(hashlib.sha256(text.encode()).hexdigest()[:8], 16)
+    vec = np.random.default_rng(seed).standard_normal(EMB_BYTES * 8).astype(np.float32)
+    vec /= np.linalg.norm(vec)
+    return np.packbits(vec > 0)[None, :], vec
+
+
+@pytest.fixture(scope="session")
+def backend_corpus(tmp_path_factory):
+    return build_corpus(tmp_path_factory.mktemp("backend_corpus"))
+
+
+@pytest.fixture(scope="session")
+def backend(backend_corpus, tmp_path_factory):
+    """The backend app with the synthetic corpus as PubMed; one per test session (MCP can start once)."""
+    import access
+    import embedder
+    import search_api
+
+    config, _ = backend_corpus
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(access, "DB_PATH", str(tmp_path_factory.mktemp("access") / "access.sqlite3"))
+        access.create_key("free", label="test", key="pub-key")
+        mp.setattr(search_api, "API_KEYS_FILE", "/nonexistent/api_keys.txt")
+        mp.setattr(search_api, "CONFIGS", [config, {}, {}, {}])
+        mp.setattr(search_api, "INTERNAL_KEY", "int-key")
+        mp.setattr(embedder, "load_model", lambda: None)
+        mp.setattr(embedder, "is_loaded", lambda: True)
+        mp.setattr(embedder, "encode_query", fake_encode)
+        with TestClient(search_api.app) as client:   # runs the real lifespan
+            yield client, search_api
