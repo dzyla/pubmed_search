@@ -166,7 +166,9 @@ function fitView() {
   if (fitted || !document.getElementById("map").clientWidth) return;
   map.invalidateSize();
   fitted = true;
+  const regions = (M.labels.coarse || []).map(l => toLL(l.x, l.y));
   if (placed.length) map.fitBounds(L.latLngBounds(placed).pad(0.35), {maxZoom: 5});
+  else if (regions.length) map.fitBounds(L.latLngBounds(regions).pad(0.12));   // where the papers are
   else map.fitBounds(world);
   showLabels();
 }
