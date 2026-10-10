@@ -168,7 +168,10 @@ function fitView() {
   fitted = true;
   const regions = (M.labels.coarse || []).map(l => toLL(l.x, l.y));
   if (placed.length) map.fitBounds(L.latLngBounds(placed).pad(0.35), {maxZoom: 5});
-  else if (regions.length) map.fitBounds(L.latLngBounds(regions).pad(0.12));   // where the papers are
+  else if (regions.length) {            // fill the frame with papers; only the sparse fringe is cropped
+    const b = L.latLngBounds(regions);
+    map.setView(b.getCenter(), map.getBoundsZoom(b, true));
+  }
   else map.fitBounds(world);
   showLabels();
 }
