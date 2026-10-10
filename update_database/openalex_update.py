@@ -59,9 +59,18 @@ CHUNK_ROWS = 25_000
 RESERVE_REQUESTS = 25          # leave a little of the daily allowance unused
 COLUMNS = ["record_id", "doi", "title", "authors", "date", "abstract", "journal", "pub_type", "pmcid", "url"]
 
+# Bump when the cleaning below changes: months harvested under an older version are
+# read again (after all new months) and the abstracts they lost are added.
+CLEANING_VERSION = 2
+
+# Landing-page text instead of an abstract (a copyright line at the end is not junk: it is trimmed)
 _JUNK = re.compile(r"(?i)you have access|get access|return to issue|advertisement|cookie|sign in to|"
                    r"purchase this|download pdf|full text available|this article is protected|"
-                   r"no abstract available|all rights reserved|©\s*\d{4}")
+                   r"no abstract available|only available as a pdf|advanced search|first page preview")
+_COPYRIGHT = re.compile(r"(?i)(copyright\s*)?(©|\(c\)\s*\d{4}|copyright\s+\d{4})")
+_RIGHTS = re.compile(r"(?i)\s*all rights reserved\.?\s*$")
+_NOT_A_PAPER = re.compile(r"(?i)^(erratum|errata|correction|corrigendum|retraction|index\b|abstracts?\b|"
+                          r"poster|program(me)?\b|contents\b|front matter|back matter|untitled)")
 _LEADING_LABEL = re.compile(r"^\s*(abstract|summary|background)\s*[:.\-–]?\s+", re.IGNORECASE)
 _TAGS = re.compile(r"<[^>]+>")
 _SESSION_PAGE = re.compile(r"^(?!e\d)[A-Za-z]{1,5}[\-.]?\d")      # 'MP02-07', 'A123', 'P1-15' (not 'e1234')
@@ -82,6 +91,14 @@ def api_key() -> str:
 # ---------------------------------------------------------------------------
 # Cleaning
 # ---------------------------------------------------------------------------
+
+def trim_trailer(text: str) -> str:
+    """Drops a copyright line ('… Copyright © 1999 John Wiley & Sons, Ltd.') at the end."""
+    m = _COPYRIGHT.search(text)
+    if m and m.start() >= 0.5 * len(text):
+        text = text[:m.start()]
+    return _RIGHTS.sub("", text).strip()
+
 
 def rebuild_abstract(inverted) -> str:
     if not inverted:
@@ -114,8 +131,8 @@ def h64(text: str) -> int:
 def to_row(work: dict):
     """A cleaned row, or (None, reason) if the work does not qualify."""
     title = " ".join(_TAGS.sub(" ", str(work.get("title") or "")).split())
-    abstract = rebuild_abstract(work.get("abstract_inverted_index"))
-    if len(title.split()) < 3:
+    abstract = trim_trailer(rebuild_abstract(work.get("abstract_inverted_index")))
+    if not re.search(r"[A-Za-z]{3}", title) or _NOT_A_PAPER.match(title):
         return None, "title"
     if len(abstract.split()) < MIN_WORDS:
         return None, "short"
@@ -146,11 +163,14 @@ def to_row(work: dict):
 
 def known_keys(base: str, cache: str) -> tuple:
     """Sorted uint64 hashes of DOIs and normalised titles already in the index (cached daily)."""
-    if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < 86_400:
+    own = glob.glob(os.path.join(base, "openalex_df", "*.parquet"))
+    newest_own = max((os.path.getmtime(f) for f in own), default=0)
+    if (os.path.exists(cache) and time.time() - os.path.getmtime(cache) < 86_400
+            and os.path.getmtime(cache) > newest_own):
         z = np.load(cache)
         return z["doi"], z["title"]
     files = (glob.glob(os.path.join(base, "pubmed26_parquet_files", "*.parquet"))
-             + glob.glob(os.path.join(base, "preprints_df", "*.parquet"))
+             + glob.glob(os.path.join(base, "preprints_df", "*.parquet")) + own
              + [os.path.join(base, "biorxiv_embed_binary", "biorxiv_metadata.parquet"),
                 os.path.join(base, "medarxiv_embed_binary", "medarxiv_metadata.parquet")])
     dois, titles = set(), set()
@@ -281,6 +301,8 @@ def main():
         os.makedirs(d, exist_ok=True)
     state_path = os.path.join(coord, "state.json")
     state = json.load(open(state_path)) if os.path.exists(state_path) else {"done": [], "chunks": 0, "stats": {}}
+    # month -> cleaning version it was harvested with (months from before versions existed: 1)
+    versions = state.setdefault("versions", {m: 1 for m in state.get("done", [])})
 
     print("Loading DOIs and titles already indexed …")
     known_doi, known_title = known_keys(args.base, os.path.join(coord, "known_keys.npz"))
@@ -300,7 +322,9 @@ def main():
             state["chunks"] += 1
             buffer = []
         if not buffer:
-            state["done"].extend(pending_months)
+            for m in pending_months:
+                versions[m] = CLEANING_VERSION
+            state["done"] = sorted(versions)
             pending_months.clear()
             if not args.dry_run:
                 state["stats"] = stats
@@ -309,9 +333,10 @@ def main():
                 os.replace(tmp, state_path)
 
     try:
-        for month, start, end in months(args.first_year):
-            if month in state["done"]:
-                continue
+        all_months = list(months(args.first_year))
+        todo = ([m for m in all_months if m[0] not in versions]                  # never harvested
+                + [m for m in all_months if versions.get(m[0], CLEANING_VERSION) < CLEANING_VERSION])
+        for month, start, end in todo:
             works = fetch_month(session, key, start, end, args.max_requests, used)
             for w in works:
                 row, reason = to_row(w)
@@ -332,7 +357,7 @@ def main():
         # the month cut short is not in pending_months: it is fetched again next run
         print(f"Daily API allowance reached after {used[0]:,} requests; the next run continues.")
     flush(force=True)
-    print(json.dumps({"months_done": len(state["done"]), "chunks": state["chunks"], "requests": used[0], **stats}))
+    print(json.dumps({"months_done": len(versions), "chunks": state["chunks"], "requests": used[0], **stats}))
 
 
 if __name__ == "__main__":
