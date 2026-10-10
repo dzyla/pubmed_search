@@ -49,6 +49,10 @@ ERROR_PATTERNS = ("Traceback", "CRITICAL", "No space left", "Input/output error"
                   "kept failing", "rsync error", "Errno", "DONE with errors")
 
 
+# cron's PATH has no Windows folders: find the Windows tools by full path too
+POWERSHELL = (shutil.which("powershell.exe")
+              or "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+
 def load_env():
     env = {}
     if os.path.exists(ENV_FILE):
@@ -171,7 +175,7 @@ def check_disks():
 
 def check_nas_backup():
     try:
-        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", f"Get-Content '{NAS_MARKER}'"],
+        out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", f"Get-Content '{NAS_MARKER}'"],
                              capture_output=True, text=True, timeout=60).stdout.strip()
         when = datetime.fromisoformat(out.splitlines()[0].strip())
         hours = (datetime.now(when.tzinfo) - when).total_seconds() / 3600
@@ -226,30 +230,33 @@ def send_outlook(to: str, subject: str, body: str):
         f"$m.To = (& $d '{b64(to)}'); $m.Subject = (& $d '{b64(subject)}'); $m.Body = (& $d '{b64(body)}');"
         "$m.Send(); try { $ol.Session.SendAndReceive($false) } catch {}"
     )
-    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+    r = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
                        capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         raise RuntimeError(f"Outlook send failed: {r.stderr.strip()[:300]}")
 
 
 def send(env: dict, title: str, body: str, priority: str = "default"):
+    """Email (Outlook) and/or ntfy push. Raises if the email could not be sent, whatever the reason."""
     topic, email = env.get("MSS_NTFY_TOPIC"), env.get("MSS_ALERT_EMAIL")
     if not email and not topic:
         raise SystemExit(f"No MSS_ALERT_EMAIL/MSS_NTFY_TOPIC in {ENV_FILE}; run with --setup EMAIL first.")
-    errors = []
+    errors, email_failed = [], False
     if email:
         try:
             send_outlook(email, title, body + f"\n\n— daily check on {socket.gethostname()}, {datetime.now():%Y-%m-%d %H:%M}")
         except Exception as exc:
-            errors.append(str(exc))
+            errors.append(f"email: {exc}")
+            email_failed = True
     if topic:
         try:
             requests.post(f"https://ntfy.sh/{topic}", data=body.encode("utf-8"), timeout=30,
                           headers={"Title": title, "Priority": priority, "Tags": "microscope"}).raise_for_status()
         except Exception as exc:
             errors.append(f"ntfy: {exc}")
-    # Email is the channel that matters; the ntfy push is best effort.
-    if email and any(e.startswith("Outlook") for e in errors):
+    # Email is the channel that matters; the ntfy push is best effort. (Checking the
+    # message text once hid a 'powershell.exe not found' failure under cron.)
+    if email_failed:
         raise RuntimeError("; ".join(errors))
 
 

@@ -18,13 +18,16 @@ LOG="${HOME}/nas_backup.log"
 stamp=$(date +%Y%m%d-%H%M%S)
 ok=1
 
-pwsh_run() { powershell.exe -NoProfile -NonInteractive -Command "$1" 2>&1 | tr -d '\r'; }
+# cron's PATH has no Windows folders: call the Windows tools by full path
+PWSH=$(command -v powershell.exe || echo /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe)
+ROBOCOPY=$(command -v robocopy.exe || echo /mnt/c/Windows/System32/Robocopy.exe)
+pwsh_run() { "$PWSH" -NoProfile -NonInteractive -Command "$1" 2>&1 | tr -d '\r'; }
 
 echo "[$(date -Is)] START backup → $NAS_UNC" >> "$LOG"
 
 # 1. pipeline data. robocopy exit codes 0-7 = success, >= 8 = failure.
 cd /mnt/c || exit 1
-robocopy.exe "$DATA_WIN" "$NAS_UNC\\snowflake" /E /COPY:DAT /DCOPY:T /R:2 /W:30 /MT:8 \
+"$ROBOCOPY" "$DATA_WIN" "$NAS_UNC\\snowflake" /E /COPY:DAT /DCOPY:T /R:2 /W:30 /MT:8 \
     /XF "*.tmp" "*.tmp.npy" /XD gpu_locks /NP /NFL /NDL /NJH >> "$LOG" 2>&1
 rc=$?
 if [ "$rc" -ge 8 ]; then
