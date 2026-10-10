@@ -42,7 +42,7 @@ from typing import List, Literal, Optional
 from dataclasses import dataclass
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
@@ -58,8 +58,9 @@ import paper_links
 from config_loader import DEFAULT_SOURCES, read_source_configs
 from mcp_server import SOURCES, SearchFailed, build_mcp
 import pandas as pd
+from map_index import MapIndex
 from search_logic import (
-    _SEARCHER_CACHE, UnknownReference, combined_search_orchestrator, similar_search,
+    _SEARCHER_CACHE, UnknownReference, combined_search_orchestrator, get_or_create_searcher, similar_search,
     trigger_database_updates, warm_up_indexes,
 )
 from utils import get_clean_doi
@@ -158,6 +159,10 @@ def _load_configs(yaml_path: str):
 
 CONFIGS = _load_configs(CONFIG_PATH)
 
+# The paper map (tiles + reference papers), shipped with the aux indexes
+_AUX_ROOT = next((c.get("aux_index_root") for c in CONFIGS or [] if c and c.get("aux_index_root")), None)
+MAP = MapIndex(_AUX_ROOT) if _AUX_ROOT else None
+
 
 def _configs_for(sources: Optional[List[str]]) -> list:
     """Source configs in search_logic order, with unselected sources blanked out."""
@@ -235,6 +240,8 @@ class Paper(BaseModel):
         "ClinicalTrials.gov NCT id for trials, NIH core project number for grants."))
     ref: Optional[str] = Field(default=None, description=(
         "Stable reference for /v1/similar and the find_similar MCP tool, e.g. 'PubMed:123456'."))
+    map_xy: Optional[List[float]] = Field(default=None, description=(
+        "Position on the paper map (map coordinates, see /v1/map), when the map is available."))
 
 
 class SearchResponse(BaseModel):
@@ -242,6 +249,8 @@ class SearchResponse(BaseModel):
     seeds: List["Paper"] = Field(default_factory=list, description="For /v1/similar: the example papers.")
     query_bits: Optional[str] = Field(default=None, description=(
         "The query's 384-bit binary code as hex — what the index matches against."))
+    query_map_xy: Optional[List[float]] = Field(default=None, description=(
+        "Position of the query on the paper map (see /v1/map)."))
     total_results: int
     search_time_seconds: float
     results: List[Paper]
@@ -308,6 +317,47 @@ async def _acquire_slot():
         raise ServerBusy("The server is busy. Please try again in a few seconds.") from None
 
 
+def _config_for_source(source: str):
+    return next((c for c in CONFIGS or [] if c and c.get("source_name") == source), None)
+
+
+def _map_positions(rows: list, packed) -> tuple:
+    """Map positions for the query code and for each result row (None where unknown)."""
+    if MAP is None or not MAP.loaded:
+        return None, [None] * len(rows)
+    codes = np.zeros((len(rows), 48), dtype=np.uint8)
+    known = np.zeros(len(rows), dtype=bool)
+    by_source: dict = {}
+    for i, row in enumerate(rows):
+        try:
+            by_source.setdefault(str(row.get("source")), []).append((i, int(row.get("corpus_id"))))
+        except (TypeError, ValueError):
+            pass
+    for source, items in by_source.items():
+        cfg = _config_for_source(source)
+        if not cfg:
+            continue
+        idx, gids = zip(*items)
+        found_codes, found = get_or_create_searcher(cfg).codes_for(list(gids))
+        codes[list(idx)] = found_codes
+        known[list(idx)] = found
+    xy = MAP.place(np.vstack([np.asarray(packed, dtype=np.uint8).reshape(1, -1), codes]))
+    rounded = [[round(float(a), 4), round(float(b), 4)] for a, b in xy]
+    return rounded[0], [p if k else None for p, k in zip(rounded[1:], known)]
+
+
+def _with_map(response: "SearchResponse", rows: list, seed_rows: list, packed) -> "SearchResponse":
+    try:
+        query_xy, xys = _map_positions(seed_rows + rows, packed)
+    except Exception as exc:              # the map is optional; never fail a search over it
+        LOGGER.error(f"Map placement failed: {exc}")
+        return response
+    response.query_map_xy = query_xy
+    for paper, xy in zip(response.seeds + response.results, xys):
+        paper.map_xy = xy
+    return response
+
+
 async def run_similar(refs: List[str], top_k: int = 10, start_date: Optional[str] = None,
                       end_date: Optional[str] = None, high_quality_only: bool = True,
                       sources: Optional[List[str]] = None) -> dict:
@@ -330,11 +380,13 @@ async def run_similar(refs: List[str], top_k: int = 10, start_date: Optional[str
     seed_papers = [_to_paper(pd.Series(sd)) for sd in seeds]
     titles = "; ".join(p.title for p in seed_papers)
     LOGGER.info(f"Similar ({len(refs)} example(s)) → {len(df)} results in {elapsed}s")
-    return SearchResponse(
+    response = SearchResponse(
         query=f"Similar to: {titles}"[:500], seeds=seed_papers, query_bits=packed.tobytes().hex(),
         total_results=len(df), search_time_seconds=elapsed,
         results=[_to_paper(row) for _, row in df.iterrows()],
-    ).model_dump()
+    )
+    response = await asyncio.to_thread(_with_map, response, [r for _, r in df.iterrows()], list(seeds), packed)
+    return response.model_dump()
 
 
 async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = None,
@@ -363,8 +415,10 @@ async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = No
     elapsed = round(time.perf_counter() - t0, 2)
     LOGGER.info(f"Search ({len(query)} chars, top_k={top_k}) → {len(results_df)} results in {elapsed}s")
     papers = [_to_paper(row) for _, row in results_df.iterrows()]
-    return SearchResponse(query=query, query_bits=packed.tobytes().hex(), total_results=len(papers),
-                          search_time_seconds=elapsed, results=papers).model_dump()
+    response = SearchResponse(query=query, query_bits=packed.tobytes().hex(), total_results=len(papers),
+                              search_time_seconds=elapsed, results=papers)
+    response = await asyncio.to_thread(_with_map, response, [r for _, r in results_df.iterrows()], [], packed)
+    return response.model_dump()
 
 
 _STATS_CACHE: dict = {"at": 0.0, "value": None}
@@ -498,6 +552,11 @@ async def _periodic_update_checker():
     """Background task: wakes hourly to pick up new embedding files."""
     while True:
         await asyncio.sleep(UPDATE_INTERVAL_S)
+        if MAP is not None:
+            try:
+                await asyncio.to_thread(MAP.refresh)
+            except Exception as exc:
+                LOGGER.error(f"Map refresh failed: {exc}")
         if CONFIGS:
             try:
                 if await asyncio.to_thread(trigger_database_updates, CONFIGS):
@@ -529,6 +588,11 @@ async def lifespan(app_: FastAPI):
         except Exception as exc:
             LOGGER.error(f"Startup update check failed: {exc}")
         warm_up_indexes(CONFIGS, background=True)
+        if MAP is not None:
+            try:
+                await asyncio.to_thread(MAP.refresh)
+            except Exception as exc:
+                LOGGER.error(f"Map failed to load: {exc}")
         tasks.append(asyncio.create_task(_periodic_update_checker()))
     async with mcp.session_manager.run():
         yield
@@ -688,6 +752,88 @@ async def similar(req: SimilarRequest, response: Response, caller: Caller = Depe
         raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from None
     except SearchFailed as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
+
+
+# ---------------------------------------------------------------------------
+# Paper map
+# ---------------------------------------------------------------------------
+# 1x1 transparent PNG for empty map areas
+_EMPTY_TILE = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                            "1f15c4890000000d49444154789c63000100000500010d0a2db40000000049454e44ae426082")
+_TILE_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+def _require_map():
+    if MAP is None or not MAP.loaded:
+        raise HTTPException(status_code=503, detail="The paper map is not available right now.")
+    return MAP
+
+
+@app.get("/v1/map", tags=["map"], summary="Paper map: version, coordinate system, topic labels")
+async def map_info():
+    """
+    Everything a client needs to draw the map: tile URL template, the world square
+    (map coordinates -> tile pixels at `max_zoom`), source colours and topic labels.
+    Search results carry `map_xy` in the same coordinates.
+    """
+    m = _require_map()
+    return {**m.meta, "version": m.version, "tiles": f"/map/tiles/{m.version}/{{z}}/{{x}}/{{y}}.png",
+            "labels": m.labels}
+
+
+@app.get("/v1/map/nearby", tags=["map"], summary="Papers at a point of the map")
+async def map_nearby(x: float, y: float, k: int = 8):
+    """The papers nearest to map point (x, y) among the 1.52M reference papers, with their `ref`."""
+    m = _require_map()
+    k = max(1, min(int(k), 20))
+    found = await asyncio.to_thread(m.nearby, x, y, k * 2)
+    papers = await asyncio.to_thread(_nearby_papers, found, k)
+    return {"x": x, "y": y, "papers": papers}
+
+
+def _nearby_papers(found: list, k: int) -> list:
+    wanted = []
+    for source, stem, row, dist in found:
+        cfg = _config_for_source(source)
+        if not cfg:
+            continue
+        searcher = get_or_create_searcher(cfg)
+        starts = {iv["source_stem"]: iv["global_start"] - iv["source_local_start"] for iv in searcher.intervals}
+        if stem not in starts:
+            continue
+        gid = int(starts[stem] + row)
+        if not searcher.is_superseded([gid])[0]:
+            wanted.append((source, gid, dist))
+    wanted = wanted[:k]
+    out = {}
+    for source in {w[0] for w in wanted}:
+        cands = [{"corpus_id": g, "score": 0.0} for s, g, _ in wanted if s == source]
+        df = get_or_create_searcher(_config_for_source(source)).fetch_rows(cands)
+        for _, row in df.iterrows():
+            row["source"] = source
+            out[(source, int(row["corpus_id"]))] = row
+    papers = []
+    for source, gid, dist in wanted:
+        row = out.get((source, gid))
+        if row is None:
+            continue
+        p = _to_paper(row)
+        papers.append({"title": p.title, "year": p.year, "journal": p.journal, "source": p.source,
+                       "url": p.url, "ref": p.ref, "labels": p.labels, "distance": round(dist, 4)})
+    return papers
+
+
+@app.get("/map/tiles/{version}/{z}/{x}/{y}.png", include_in_schema=False)
+async def map_tile(version: str, z: int, x: int, y: int):
+    m = _require_map()
+    if version != m.version:
+        # an older version's URL (cached page): serve the current tiles, briefly cacheable
+        path, headers = m.tile_path(z, x, y), {"Cache-Control": "public, max-age=300"}
+    else:
+        path, headers = m.tile_path(z, x, y), _TILE_CACHE
+    if path is None:
+        return Response(content=_EMPTY_TILE, media_type="image/png", headers=headers)
+    return FileResponse(path, media_type="image/png", headers=headers)
 
 
 # ---------------------------------------------------------------------------

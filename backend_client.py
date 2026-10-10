@@ -96,3 +96,12 @@ def stats() -> dict:
         return r.json() if r.status_code == 200 else {}
     except requests.exceptions.RequestException:
         return {}
+
+
+def map_info() -> dict:
+    """Paper map description (tile URL template, coordinate system, labels); {} if unavailable."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/v1/map", timeout=10)
+        return r.json() if r.status_code == 200 else {}
+    except requests.exceptions.RequestException:
+        return {}
