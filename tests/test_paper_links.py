@@ -64,3 +64,26 @@ def test_free_full_text_link_and_label():
                                        ("Free full text", "https://pmc.ncbi.nlm.nih.gov/articles/PMC456/"),
                                        ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/123/")]
     assert "Free full text" in pl.badges(row)
+
+
+def test_sici_doi_that_lost_its_brackets_is_not_linked():
+    broken = {"source": "PubMed", "doi": "10.1897/1551-5028(2002)0212.0.co;2", "pmid": "12109743"}
+    assert pl.build_links(broken) == [("PubMed", "https://pubmed.ncbi.nlm.nih.gov/12109743/")]
+    intact = "10.1897/1551-5028(2002)021<1423:afvots>2.0.co;2"
+    assert pl.linkable_doi(intact) == intact and pl.linkable_doi("not a doi") == ""
+
+
+def test_pubmed_parser_takes_the_articles_own_doi():
+    import os
+    import sys
+    import xml.etree.ElementTree as ET
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "update_database"))
+    from pubmed_download_parquet import article_doi
+    xml = """<PubmedArticle><MedlineCitation><PMID>1</PMID><Article/></MedlineCitation><PubmedData>
+      <ArticleIdList><ArticleId IdType="pubmed">1</ArticleId>
+        <ArticleId IdType="doi">10.1897/1551-5028(2002)021&lt;1423:AFVOTS&gt;2.0.CO;2</ArticleId></ArticleIdList>
+      <ReferenceList><Reference><ArticleIdList><ArticleId IdType="doi">10.9/cited</ArticleId></ArticleIdList></Reference></ReferenceList>
+    </PubmedData></PubmedArticle>"""
+    assert article_doi(ET.fromstring(xml)) == "10.1897/1551-5028(2002)021<1423:AFVOTS>2.0.CO;2"
+    no_own = xml.replace('<ArticleId IdType="doi">10.1897/1551-5028(2002)021&lt;1423:AFVOTS&gt;2.0.CO;2</ArticleId>', "")
+    assert article_doi(ET.fromstring(no_own)) == ""          # never a cited paper's DOI

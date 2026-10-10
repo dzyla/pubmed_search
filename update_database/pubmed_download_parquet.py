@@ -202,6 +202,20 @@ def format_text(text):
     text = re.sub(r'[^\x20-\x7E]', '', text)
     return ' '.join(text.split())
 
+def article_doi(elem) -> str:
+    """
+    The article's own DOI. Not './/ArticleId' (that also matches the DOIs of
+    cited papers in the ReferenceList) and not format_text (it deletes '<...>'
+    as if it were markup, which breaks SICI DOIs like '...021<1423:afvots>2.0.co;2').
+    """
+    for path in ('./PubmedData/ArticleIdList/ArticleId[@IdType="doi"]',
+                 './MedlineCitation/Article/ELocationID[@EIdType="doi"]'):
+        node = elem.find(path)
+        if node is not None and node.text and node.text.strip():
+            return "".join(node.text.split())
+    return ""
+
+
 def parse_date(year, month, day):
     """Parse date components and return a formatted date string (YYYY-MM-DD)."""
     month_mapping = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
@@ -303,10 +317,7 @@ def efficient_process_xml_file(filename):
                         if 'Version' in pmid_elem.attrib:
                             article_data['version'] = pmid_elem.attrib['Version']
                             
-                    for aid in elem.findall('.//ArticleId'):
-                        if aid.get('IdType') == 'doi' and aid.text:
-                            article_data['doi'] = format_text(aid.text)
-                            break
+                    article_data['doi'] = article_doi(elem)
 
                     # Title
                     title_elem = elem.find('.//ArticleTitle')
