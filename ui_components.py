@@ -45,7 +45,10 @@ _CSS = f"""
     font-family: "Newsreader", serif; font-weight: 500; font-size: 3rem;
     letter-spacing: -0.02em; line-height: 1; margin: 0 0 0.6rem 0; padding: 0; color: {INK};
   }}
-  .mss-head p {{ margin: 0; color: {MUTED}; font-size: 0.95rem; line-height: 1.5; max-width: 38rem; }}
+  .mss-head h1 a {{ color: inherit !important; text-decoration: none; }}
+  .mss-head h1 a:hover {{ color: {EOSIN} !important; }}
+  .mss-head h1 a:focus-visible {{ outline: 2px solid {EOSIN}; outline-offset: 4px; border-radius: 2px; }}
+  .mss-head p {{ margin: 0; color: {MUTED}; font-size: 1.02rem; line-height: 1.5; max-width: 44rem; }}
   .mss-head p strong {{ color: {INK}; font-weight: 600; }}
   .mss-head .mss-fresh {{ font-size: 0.82rem; margin-top: 0.35rem; }}
   .mss-head {{ margin-bottom: 1.6rem; }}
@@ -131,26 +134,28 @@ def _fmt_date(value) -> str:
         return ""
 
 
+def _round_millions(n: int) -> str:
+    return f"{n / 1e6:.1f} million" if n >= 1e6 else f"{n:,}"
+
+
 def render_header(stats: dict, active_users: int):
-    sources = stats.get("sources", {})
     total = stats.get("total_papers", 0)
-    names = [SOURCE_NAMES.get(s, s) for s in sources] or list(SOURCE_NAMES.values())
-    listed = ", ".join(names[:-1]) + (" and " if len(names) > 1 else "") + names[-1]
-    lead = (f"Describe a finding, a question or paste an abstract. We search "
-            f"<strong>{total:,}</strong> abstracts and trial registrations from {listed} "
-            f"by meaning, not keywords."
-            if total else
-            f"Describe a finding, a question or paste an abstract. We search abstracts from "
-            f"{listed} by meaning, not keywords.")
-    fresh = [f"{SOURCE_NAMES.get(s, s)} {_fmt_date(i.get('updated'))}"
-             for s, i in sources.items() if _fmt_date(i.get("updated"))]
-    fresh_line = ("Last updated: " + ", ".join(fresh) + ". ") if fresh else ""
-    people = f"{active_users} {'person' if active_users == 1 else 'people'} searching now."
+    lead = (f"Search <strong>{_round_millions(total)}</strong> papers, preprints, clinical trials and "
+            f"grants by meaning, not keywords." if total else
+            "Search papers, preprints, clinical trials and grants by meaning, not keywords.")
+    people = f"{active_users} {'person' if active_users == 1 else 'people'} searching now"
+    # The title starts a fresh search (a full reload drops the query and results).
     st.markdown(
-        f"""<header class="mss-head"><h1>Manuscript Search</h1><p>{lead}</p>
-        <p class="mss-fresh">{_e(fresh_line)} {people}</p></header>""",
+        f"""<header class="mss-head"><h1><a href="/" target="_self" title="Start a new search">Manuscript Search</a></h1>
+        <p>{lead}</p><p class="mss-fresh">{people}</p></header>""",
         unsafe_allow_html=True,
     )
+
+
+def freshness_line(stats: dict) -> str:
+    fresh = [f"{SOURCE_NAMES.get(s, s)} {_fmt_date(i.get('updated'))}"
+             for s, i in stats.get("sources", {}).items() if _fmt_date(i.get("updated"))]
+    return ("Last updated: " + ", ".join(fresh) + ".") if fresh else ""
 
 
 # ---------------------------------------------------------------------------
@@ -447,9 +452,9 @@ def results_csv(df: pd.DataFrame) -> str:
 # Footer
 # ---------------------------------------------------------------------------
 
-def render_footer():
+def render_footer(freshness: str = ""):
     st.markdown(
-        """<footer class="mss-foot">
+        f"""<footer class="mss-foot">{_e(freshness) + "<br>" if freshness else ""}
         Built by Dawid Zyla at the
         <a href="https://zylalab.org" target="_blank" rel="noopener">Zyla Lab (zylalab.org)</a>.
         Not affiliated with PubMed, bioRxiv, medRxiv, arXiv or ClinicalTrials.gov.

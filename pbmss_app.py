@@ -129,16 +129,10 @@ with st.form("search_form", border=False):
         help="Full sentences, research questions or a pasted abstract work best. "
              "Only about the first 2,000 characters are read.",
     )
-    c1, c2, c3 = st.columns([1, 2, 1.3], vertical_alignment="bottom")
-    num_to_show = c1.number_input("Results", min_value=1, max_value=50, value=10)
-    sources = c2.pills(
+    sources = st.pills(
         "Databases", SOURCE_OPTIONS, default=DEFAULT_SOURCES, selection_mode="multi",
         format_func=lambda s: SOURCE_LABELS[s],
     ) or []
-    use_high_quality = c3.toggle(
-        "Skip short abstracts", value=True,
-        help="Leave out entries with very short or missing abstracts.",
-    )
 
     if st.session_state.get("date_filter_toggle", False):
         col_d1, col_d2 = st.columns(2)
@@ -153,7 +147,14 @@ with st.form("search_form", border=False):
     else:
         start_date_str = end_date_str = None
 
-    submitted = st.form_submit_button("Search", type="primary", icon=":material/search:") or auto_search
+    c1, c2, c3 = st.columns([1, 1, 1.6], vertical_alignment="bottom")
+    submitted = c1.form_submit_button("Search", type="primary", icon=":material/search:",
+                                      width="stretch") or auto_search
+    num_to_show = c2.number_input("Results", min_value=1, max_value=50, value=10)
+    use_high_quality = c3.toggle(
+        "Skip short abstracts", value=True,
+        help="Leave out entries with very short or missing abstracts.",
+    )
 
 col_t1, col_t2 = st.columns(2)
 col_t2.toggle("Filter by publication date", value=False, key="date_filter_toggle")
@@ -303,7 +304,8 @@ if not final_results.empty:
             st.markdown(st.session_state["ai_summary"])
             st.caption("Written by Gemini from the abstracts; numbers refer to the list below.")
 
-    tab_results, tab_map, tab_export, tab_chat = st.tabs(["Papers", "Map", "Export", "Ask the papers"])
+    tab_results, tab_map, tab_time, tab_export, tab_chat = st.tabs(
+        ["Papers", "Map", "Timeline", "Export", "Ask the papers"])
 
     with tab_results:
         top_score = float(final_results["score"].max())
@@ -321,9 +323,6 @@ if not final_results.empty:
                     if a2.button("Similar papers", key=f"sim::{ref}", icon=":material/hub:", type="tertiary"):
                         st.session_state["similar_request"] = [ref]
                         st.rerun()
-        st.markdown("#### Relevance and publication date")
-        st.plotly_chart(ui_components.plot_score_vs_year(results), width="stretch",
-                        config={"displayModeBar": False})
 
     with tab_map:
         map_info = cached_map_info()
@@ -334,6 +333,12 @@ if not final_results.empty:
             st.caption("Every paper in the index, laid out so that papers on similar topics sit close "
                        "together. The star is your query and the numbered pins are your results. Click "
                        "anywhere to see the papers at that spot.")
+
+    with tab_time:
+        st.plotly_chart(ui_components.plot_score_vs_year(results), width="stretch",
+                        config={"displayModeBar": False})
+        st.caption("Each dot is one of your results: how well it matches your query against when it "
+                   "was published. Larger dots are cited more often.")
 
     with tab_export:
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -375,4 +380,4 @@ if not final_results.empty:
         st.session_state["ai_questions"] = questions
         st.rerun()
 
-ui_components.render_footer()
+ui_components.render_footer(ui_components.freshness_line(corpus_stats()))
