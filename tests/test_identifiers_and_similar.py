@@ -102,3 +102,30 @@ def test_pmc_lookup(tmp_path):
     assert meta["articles"] == 2                      # no PMID / still embargoed are left out
     idx = PmcIndex(str(tmp_path / "aux"))
     assert idx.refresh() and idx.lookup(["100", 300, "200", None, "x"]) == ["PMC20", "PMC10", None, None, None]
+
+
+def test_common_words_do_not_boost_small_sources():
+    import search_logic as sl
+
+    class Aux:
+        loaded = True
+
+        def __init__(self, df, common=()):
+            self.df, self.common_set = df, set(common)
+
+        def is_common(self, h):
+            return h in self.common_set
+
+        def doc_count(self, h):
+            return self.df.get(h, 0)
+
+    def searcher(rows, aux):
+        s = sl.ChunkedSearcher.__new__(sl.ChunkedSearcher)
+        s.metadata, s.aux = {"total_rows": rows}, aux
+        return s
+
+    small = searcher(360_000, Aux({1: 9_000, 2: 40}))          # '2d' in 9,000 preprints, 'tmem175' in 40
+    assert small._too_common_here(1) and not small._too_common_here(2)
+    big = searcher(45_000_000, Aux({2: 600}, common=[1]))      # PubMed dropped '2d' when building
+    assert big.common_tokens({"2d": 1, "tmem175": 2}) == {"2d"}
+    assert small.common_tokens({"2d": 1, "tmem175": 2}) == set()
