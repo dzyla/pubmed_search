@@ -28,6 +28,7 @@ _WISHLIST = frozenset({
     "pmid", "type", "version",
     "nct_id", "trial_status", "trial_phase", "has_results", "pmids",
     "published_pmid", "license",
+    "pub_type", "pmcid",                       # OpenAlex
     "grant_id", "appl_id", "ic", "activity_code", "organization", "fiscal_year",
 })
 

@@ -59,3 +59,11 @@ grants_config:
   metadata_path: "/root/pubmed_semantic_search/grants_chunked_memmap_metadata.json"
   data_folder: "/root/pubmed_semantic_search/grants_df/"
   chunk_size_bytes: 1073741824
+
+openalex_config:
+  embeddings_directory: "/root/pubmed_semantic_search/openalex_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "/root/chunked/chunked_openalex_embeddings/"
+  metadata_path: "/root/pubmed_semantic_search/openalex_chunked_memmap_metadata.json"
+  data_folder: "/root/pubmed_semantic_search/openalex_df/"
+  chunk_size_bytes: 1073741824

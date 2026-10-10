@@ -22,9 +22,10 @@ LOGGER = logging.getLogger(__name__)
 INK, EOSIN, MUTED, RULE, GLASS = "#2A2250", "#C8336B", "#6D6884", "#DDD9E8", "#F4F3F8"
 # Methyl green (a classic counterstain) for trials, keeping the histology palette.
 SOURCE_COLORS = {"PubMed": INK, "BioRxiv": EOSIN, "MedRxiv": "#7A6FB0", "arXiv": "#B7832F",
-                 "ClinicalTrials": "#3E7D63", "Preprints": "#A0507A", "Grants": "#56708F"}
+                 "ClinicalTrials": "#3E7D63", "Preprints": "#A0507A", "Grants": "#56708F",
+                 "OpenAlex": "#8C5A3C"}
 SOURCE_NAMES = {"PubMed": "PubMed", "BioRxiv": "bioRxiv", "MedRxiv": "medRxiv", "arXiv": "arXiv",
-                "ClinicalTrials": "ClinicalTrials.gov", "Preprints": "Other preprints",
+                "ClinicalTrials": "ClinicalTrials.gov", "Preprints": "Other preprints", "OpenAlex": "Other journals",
                 "Grants": "NIH grants"}
 _NO_CITATIONS = {"arXiv", "ClinicalTrials", "Grants"}   # no Crossref DOI to count citations for
 _SERVER_NAMES = {"biorxiv": "bioRxiv", "medrxiv": "medRxiv"}

@@ -21,7 +21,7 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
-_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants")
+_SOURCE_NAMES = ("PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants", "OpenAlex")
 _PREPRINT_DOI_PREFIXES = ("10.1101/", "10.64898/")     # bioRxiv/medRxiv (old and new prefix)
 
 # ---------------------------------------------------------------------------
@@ -1390,7 +1390,10 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
 
     pmc = _pmc_index(configs)
     if pmc is not None and "pmid" in result_df.columns:
-        result_df["pmcid"] = pmc.lookup(result_df["pmid"].tolist())
+        found = pd.Series(pmc.lookup(result_df["pmid"].tolist()), index=result_df.index, dtype=object)
+        # keep PMC ids a source already carries (OpenAlex), fill the rest from PubMed ids
+        result_df["pmcid"] = (result_df["pmcid"].where(result_df["pmcid"].astype(str).str.startswith("PMC"), found)
+                              if "pmcid" in result_df.columns else found)
 
     if "doi" in result_df.columns:
         preprint_mask = (result_df["source"] == "PubMed") & result_df["doi"].astype(str).str.contains(
