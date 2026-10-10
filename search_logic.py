@@ -318,6 +318,16 @@ class ChunkedSearcher:
             found[m] = True
         return out, found
 
+    def common_tokens(self, token_hashes: dict) -> set:
+        """Query tokens the index builder dropped here for being in too many documents."""
+        if self.aux is None or not self.aux.loaded:
+            return set()
+        return {tok for tok, h in token_hashes.items() if self.aux.is_common(h)}
+
+    def _too_common_here(self, token_hash: int) -> bool:
+        cap = max(EXACT_MIN_DOC_CAP, EXACT_MAX_DOC_SHARE * int(self.metadata.get("total_rows", 0)))
+        return self.aux.doc_count(token_hash) > cap
+
     def exact_candidates(self, token_hashes: dict, query_float=None, query_packed=None,
                          boost: float = None) -> list:
         """
@@ -329,6 +339,8 @@ class ChunkedSearcher:
             return []
         per_token = {}
         for tok, h in token_hashes.items():
+            if self._too_common_here(h):
+                continue
             p = self.aux.postings(h)
             if p is None:
                 continue
@@ -970,6 +982,13 @@ RESULT_COLUMNS = [
 EXACT_MAX_DOCS = 2000
 EXACT_BOOST = 0.08   # calibrated on real PubMed data (see eval/README.md)
 MAX_QUERY_IDENTIFIERS = 6
+# A token in more than this share of a source's documents is a common word there
+# ("2D", "COVID19"), not an identifier: 0.05% is ~20,000 PubMed papers, ~180 bioRxiv
+# preprints (at least EXACT_MIN_DOC_CAP). Without this, the absolute 20,000-document
+# cap let words PubMed drops boost every match in the smaller databases. Tokens the
+# index builder dropped as common in any source are also ignored in all of them.
+EXACT_MAX_DOC_SHARE = 0.0005
+EXACT_MIN_DOC_CAP = 100
 
 
 def _norm_doi(value) -> str:
@@ -1202,6 +1221,13 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         for name, cfg in zip(_SOURCE_NAMES, configs)
         if cfg
     }
+    if token_hashes:
+        # judged against every loaded source, not only the selected ones
+        common = set()
+        for s in {id(x): x for x in list(_SEARCHER_CACHE.values()) +
+                  [get_or_create_searcher(c) for c in sources_map.values()]}.values():
+            common |= s.common_tokens(token_hashes)
+        token_hashes = {t: h for t, h in token_hashes.items() if t not in common}
 
     searchers: dict = {}
     all_global_candidates = []

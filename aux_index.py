@@ -30,6 +30,7 @@ class AuxIndex:
         self.stems: list = []
         self._hash = self._offsets = self._stem = self._row = None
         self.superseded = None          # (stem_ids, rows) or None
+        self.common = None              # sorted hashes of tokens dropped as too common
         self.meta: dict = {}
 
     def _complete_versions(self):
@@ -49,6 +50,8 @@ class AuxIndex:
                 self.stems = json.load(f)
             with open(os.path.join(path, "zzz_complete.json")) as f:
                 self.meta = json.load(f)
+            common = os.path.join(path, "common.npy")
+            self.common = np.load(common) if os.path.exists(common) else None
             sup = os.path.join(path, "superseded_stem.npy")
             self.superseded = ((np.load(sup), np.load(os.path.join(path, "superseded_row.npy")))
                                if os.path.exists(sup) else None)
@@ -67,6 +70,24 @@ class AuxIndex:
     @property
     def loaded(self) -> bool:
         return self._hash is not None
+
+    def doc_count(self, token_hash: int) -> int:
+        """Number of documents containing the token (0 if absent or dropped as common)."""
+        if not self.loaded:
+            return 0
+        h = np.uint64(token_hash)
+        i = int(np.searchsorted(self._hash, h))
+        if i >= len(self._hash) or self._hash[i] != h:
+            return 0
+        return int(self._offsets[i + 1] - self._offsets[i])
+
+    def is_common(self, token_hash: int) -> bool:
+        """True if the builder dropped the token for being in too many documents."""
+        if self.common is None or not len(self.common):
+            return False
+        h = np.uint64(token_hash)
+        i = int(np.searchsorted(self.common, h))
+        return i < len(self.common) and self.common[i] == h
 
     def postings(self, token_hash: int):
         """(stem_ids, rows) for one token hash, or None if absent / too common."""

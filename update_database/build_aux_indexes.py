@@ -130,6 +130,7 @@ def build_source(name: str, base: str, workers: int):
     np.save(os.path.join(out, "offsets.npy"), offsets)
     np.save(os.path.join(out, "stem.npy"), S)
     np.save(os.path.join(out, "row.npy"), R)
+    np.save(os.path.join(out, "common.npy"), uniq[~keep])     # dropped as common: ignored in every source
     with open(os.path.join(out, "stems.json"), "w") as f:
         json.dump(stems, f)
 
