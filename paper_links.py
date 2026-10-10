@@ -21,6 +21,7 @@ _TYPE_BADGES = [
     ("Randomized Controlled Trial", "RCT"),
     ("Clinical Trial", "Clinical trial"),
     ("Case Reports", "Case report"),
+    ("Conference abstract", "Conference abstract"),
     ("Preprint", "Preprint"),
 ]
 

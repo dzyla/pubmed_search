@@ -173,7 +173,7 @@ def _configs_for(sources: Optional[List[str]]) -> list:
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
-SourceName = Literal["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants"]
+SourceName = Literal["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants", "OpenAlex"]
 
 
 class SearchRequest(BaseModel):
@@ -223,7 +223,9 @@ class Paper(BaseModel):
     date: Optional[str] = Field(default=None, description="Publication or posting date (YYYY-MM-DD).")
     year: Optional[int]
     score: float = Field(description="Relevance score between 0.0 (no match) and 1.0 (perfect match).")
-    source: str = Field(description="Database: PubMed | BioRxiv | MedRxiv | arXiv | ClinicalTrials | Preprints | Grants.")
+    source: str = Field(description=(
+        "Database: PubMed | BioRxiv | MedRxiv | arXiv | ClinicalTrials | Preprints | Grants | OpenAlex "
+        "(biology and medicine journals outside PubMed, incl. meeting abstracts)."))
     url: Optional[str] = Field(default=None, description="Best link to the paper (DOI, arXiv or PubMed).")
     links: List[Link] = Field(default_factory=list, description="All links: DOI, PubMed, PDF, published version, preprint.")
     pmid: Optional[str] = Field(default=None, description="PubMed ID, when available.")

@@ -49,6 +49,7 @@ SOURCES = {
     "ClinicalTrials": ("clinicaltrials_embed", "clinicaltrials_df", None,
                        ["title", "abstract", "nct_id", "conditions", "interventions"]),
     "Preprints": ("preprints_embed", "preprints_df", None, ["title", "abstract"]),
+    "OpenAlex": ("openalex_embed", "openalex_df", None, ["title", "abstract"]),
     "Grants": ("grants_embed", "grants_df", None, ["title", "abstract", "grant_id"]),
 }
 

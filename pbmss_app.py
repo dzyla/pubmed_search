@@ -31,7 +31,7 @@ import ui_data
 
 LOGGER = logging.getLogger(__name__)
 
-SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "Grants"]
+SOURCE_OPTIONS = ["PubMed", "BioRxiv", "MedRxiv", "arXiv", "ClinicalTrials", "Preprints", "OpenAlex", "Grants"]
 DEFAULT_SOURCES = [s for s in SOURCE_OPTIONS if s != "Grants"]   # grants are opt-in
 SOURCE_LABELS = ui_components.SOURCE_NAMES
 
