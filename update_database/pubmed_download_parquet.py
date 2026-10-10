@@ -444,6 +444,10 @@ def process_and_save(file_path):
     df = efficient_process_xml_file(file_path)
     if df is not None and not df.empty:
         save_optimized_parquet(df, parquet_file)
+        # The XML (~150-250 MB uncompressed) is not needed once its parquet exists;
+        # left behind, hundreds of them filled the H: drive.
+        if os.path.exists(parquet_file):
+            os.remove(file_path)
     else:
         print(f"Warning: No valid data extracted from {file_stem}")
 
