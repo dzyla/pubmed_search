@@ -295,7 +295,9 @@ class _Int8Files:
             sig = self._sig(path)
             with open(path, "rb") as f:
                 version = np.lib.format.read_magic(f)
-                shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+                read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                               else np.lib.format.read_array_header_2_0)
+                shape, fortran, dtype = read_header(f)
                 offset = f.tell()
         except FileNotFoundError:
             return None
