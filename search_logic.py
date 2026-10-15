@@ -54,7 +54,7 @@ _PMC_INDEXES: dict = {}
 # int8 rescoring (int8_codes.py): the best INT8_RESCORE_DEPTH candidates of a search
 # are re-ranked with their int8 vectors, read from disk with parallel preads (the
 # server's disk does ~16k random reads/s, so the depth bounds the I/O per query).
-INT8_RESCORE_DEPTH = int(os.environ.get("MSS_INT8_DEPTH", "1000"))
+INT8_RESCORE_DEPTH = int(os.environ.get("MSS_INT8_DEPTH", "2000"))
 _INT8_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="int8-read")
 # An int8 row whose signs agree with the stored binary code on fewer bits than this
 # describes another document (a file not yet synced or rebuilt): keep the binary score.

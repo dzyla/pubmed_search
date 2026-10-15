@@ -83,9 +83,10 @@ agreement with re-scoring all ~42k candidates of a search, before dedup —
 | 0 (binary only) | 0.59 | 0.56 | 0.56 |
 | 250 | 1.00 | 0.985 | 0.898 |
 | 500 | 1.00 | 0.994 | 0.957 |
-| **1,000 (default)** | 1.00 | 0.999 | 0.984 |
-| 2,000 | 1.00 | 1.000 | 0.997 |
+| 1,000 | 1.00 | 0.999 | 0.984 |
+| **2,000 (default)** | 1.00 | 1.000 | 0.997 |
 
 The bits → int8 score slope is 0.99 (IQR 0.92–1.07), so `EXACT_BOOST` keeps its value.
-On the server, re-scoring 1,000 candidates takes 0.06–0.09 s (cold reads included).
+On the server, re-scoring 1,000 candidates takes 0.06–0.09 s (cold reads included);
+the default is 2,000 (`MSS_INT8_DEPTH`).
 Re-embedding everything: 56.4M documents in 4.9 h on the RTX 5080 (`fast_embed.py`).
