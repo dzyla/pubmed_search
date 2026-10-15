@@ -446,6 +446,10 @@ def _compute_stats() -> dict:
             # count unique papers, not the older record versions that search hides
             info["papers"] -= searcher.superseded_count
             info["older_versions_hidden"] = searcher.superseded_count
+        if searcher is not None:
+            st = searcher.int8_status()
+            # share of embedding files whose int8 vectors are present (used for re-ranking)
+            info["int8_coverage"] = round(st["int8_files"] / st["files"], 4) if st["files"] else 0.0
         if searcher is not None and searcher.data_problem:
             info["available"] = False
             info["problem"] = searcher.data_problem

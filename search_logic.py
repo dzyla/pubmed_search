@@ -11,6 +11,7 @@ import pandas as pd
 from pathlib import Path
 import concurrent.futures
 from collections import OrderedDict
+import int8_codes
 from aux_index import AuxIndex, PmcIndex
 from data_handler import fetch_specific_rows, build_sorted_intervals_from_metadata, clear_parquet_cache
 from identifiers import identifier_tokens, token_hash
@@ -49,6 +50,15 @@ _INDEX_GENERATION = 0
 
 # PMID -> PMCID lookup for "Free full text" links (one per aux-index root)
 _PMC_INDEXES: dict = {}
+
+# int8 rescoring (int8_codes.py): the best INT8_RESCORE_DEPTH candidates of a search
+# are re-ranked with their int8 vectors, read from disk with parallel preads (the
+# server's disk does ~16k random reads/s, so the depth bounds the I/O per query).
+INT8_RESCORE_DEPTH = int(os.environ.get("MSS_INT8_DEPTH", "1000"))
+_INT8_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="int8-read")
+# An int8 row whose signs agree with the stored binary code on fewer bits than this
+# describes another document (a file not yet synced or rebuilt): keep the binary score.
+_INT8_MIN_SIGN_AGREEMENT = 0.9
 
 
 def _pmc_index(configs):
@@ -244,6 +254,9 @@ class ChunkedSearcher:
         self.npy_pattern = config["npy_files_pattern"]
         self.combined_data_file = config.get("combined_data_file")
         self.chunk_size_bytes = config.get("chunk_size_bytes", 1 << 30)
+        self.int8_dir = config.get("int8_directory") or int8_codes.int8_dir(self.embeddings_dir)
+        self._int8_files: dict = {}     # stem -> (fd, data offset, rows, (mtime_ns, size))
+        self._int8_lock = threading.Lock()
         self.was_updated = False
 
         self._ensure_chunks_exist()
@@ -318,6 +331,100 @@ class ChunkedSearcher:
             found[m] = True
         return out, found
 
+    # ------------------------------------------------------------------
+    # int8 vectors (int8_codes.py), read per candidate from <stem>.npy files
+    # ------------------------------------------------------------------
+
+    def _int8_file(self, stem: str):
+        """(fd, data offset, rows) of a stem's int8 file, reopened when the file changed; None if absent."""
+        path = os.path.join(self.int8_dir, f"{stem}.npy")
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        sig = (st.st_mtime_ns, st.st_size)
+        with self._int8_lock:
+            entry = self._int8_files.get(stem)
+            if entry is not None and entry[3] == sig:
+                return entry[:3]
+            try:
+                with open(path, "rb") as f:
+                    version = np.lib.format.read_magic(f)
+                    shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+                    offset = f.tell()
+                if dtype != np.int8 or len(shape) != 2 or shape[1] != int8_codes.DIM or fortran:
+                    LOGGER.warning(f"Ignoring int8 file {path}: shape {shape}, dtype {dtype}")
+                    return None
+                fd = os.open(path, os.O_RDONLY)
+                if hasattr(os, "posix_fadvise"):
+                    # single-row reads: no readahead (it would read ~128 KB per 384-byte row)
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+            except Exception as e:
+                LOGGER.warning(f"Cannot open int8 file {path}: {e}")
+                return None
+            if entry is not None:
+                os.close(entry[0])
+            self._int8_files[stem] = (fd, offset, shape[0], sig)
+            return fd, offset, shape[0]
+
+    def int8_rows(self, gids):
+        """
+        int8 vectors for global row ids -> (codes (n, 384) int8, found bool (n,)).
+        Rows of a stem without an int8 file (or beyond its end) are not found.
+        """
+        gids = np.asarray(gids, dtype=np.int64)
+        codes = np.zeros((len(gids), int8_codes.DIM), dtype=np.int8)
+        found = np.zeros(len(gids), dtype=bool)
+        if not len(gids) or not self.intervals:
+            return codes, found
+        starts = np.array([iv["global_start"] for iv in self.intervals], dtype=np.int64)
+        pos = np.searchsorted(starts, gids, side="right") - 1
+        by_stem: dict = {}
+        for i, (g, p) in enumerate(zip(gids, pos)):
+            if p < 0:
+                continue
+            iv = self.intervals[p]
+            if g > iv["global_end"]:
+                continue
+            by_stem.setdefault(iv["source_stem"], []).append((i, iv["source_local_start"] + int(g - iv["global_start"])))
+        row_bytes = int8_codes.DIM
+
+        def read(stem_rows):
+            stem, rows = stem_rows
+            f = self._int8_file(stem)
+            if f is None:
+                return
+            fd, offset, n = f
+            for i, r in rows:
+                if r < n:
+                    buf = os.pread(fd, row_bytes, offset + r * row_bytes)
+                    if len(buf) == row_bytes:
+                        codes[i] = np.frombuffer(buf, dtype=np.int8)
+                        found[i] = True
+
+        try:
+            list(_INT8_POOL.map(read, by_stem.items()))
+        except Exception as e:
+            LOGGER.warning(f"int8 read failed in {self.chunk_dir}: {type(e).__name__}: {e}")
+        return codes, found
+
+    def checked_int8_rows(self, gids):
+        """int8_rows, keeping only rows whose signs match the stored binary code."""
+        codes8, ok = self.int8_rows(gids)
+        if ok.any():
+            bits, found = self.codes_for(np.asarray(gids, dtype=np.int64)[ok])
+            lo, step = int8_codes.load_calibration()
+            signs = int8_codes.binary((codes8[ok].astype(np.float32) + 128) * step + lo)
+            agree = 1.0 - np.unpackbits(signs ^ bits, axis=1).mean(axis=1)
+            ok[np.flatnonzero(ok)] = found & (agree >= _INT8_MIN_SIGN_AGREEMENT)
+        return codes8, ok
+
+    def int8_status(self) -> dict:
+        """How many of this source's embedding files have an int8 file next to them."""
+        stems = {iv["source_stem"] for iv in self.intervals}
+        have = sum(os.path.exists(os.path.join(self.int8_dir, f"{s}.npy")) for s in stems)
+        return {"files": len(stems), "int8_files": have}
+
     def common_tokens(self, token_hashes: dict) -> set:
         """Query tokens the index builder dropped here for being in too many documents."""
         if self.aux is None or not self.aux.loaded:
@@ -369,7 +476,7 @@ class ChunkedSearcher:
         boost = np.where(share >= 1.0, full, full * 0.5 * share)
         tokens = list(per_token)
         return [
-            {"corpus_id": int(g), "score": float(sc + b),
+            {"corpus_id": int(g), "score": float(sc + b), "boost": float(b),
              "matched_terms": [tokens[j] for j in np.flatnonzero(h)]}
             for g, sc, b, h in zip(all_g, scores, boost, hits)
         ]
@@ -1180,12 +1287,81 @@ def _filter_candidates_by_date(candidates, searchers, start_date, end_date) -> l
     return [c for c in candidates if (c["source"], c["corpus_id"]) in passing]
 
 
-def _candidate_batches(candidates, batch_size, date_filter, searchers):
+def _screen_by_date(candidates, n, searchers, start_date, end_date):
+    """
+    Screens score-ordered candidates on the date column until n pass (or none are
+    left), probing ever larger slices. Returns (passing, number of candidates screened).
+    """
+    passing: list = []
+    pos, probe = 0, max(200, n)
+    while len(passing) < n and pos < len(candidates):
+        passing += _filter_candidates_by_date(candidates[pos:pos + probe], searchers, start_date, end_date)
+        pos += probe
+        probe = min(probe * 2, 20_000)
+    return passing, pos
+
+
+def _rescore_head_int8(candidates, depth, searchers, query_float):
+    """
+    Re-scores the best `depth` candidates with the float query against their int8
+    vectors (int8_codes.py) and re-sorts them; identifier boosts are kept. Candidates
+    without a usable int8 row, and everything below the head, keep their order and
+    get their binary score mapped onto the int8 scale (a linear fit over the head),
+    capped so they stay below the re-ranked head.
+    """
+    head, tail = candidates[:depth], candidates[depth:]
+    if not head:
+        return candidates
+    q = np.asarray(query_float, dtype=np.float32)
+    new = np.full(len(head), np.nan)
+    by_source: dict = {}
+    for i, c in enumerate(head):
+        by_source.setdefault(c["source"], []).append(i)
+
+    def score_source(item):
+        source, idx = item
+        searcher = searchers.get(source)
+        if searcher is None:
+            return
+        codes8, ok = searcher.checked_int8_rows([head[i]["corpus_id"] for i in idx])
+        if ok.any():
+            cos = int8_codes.cosine(q, codes8[ok])
+            for i, s in zip(np.asarray(idx)[ok], cos):
+                new[i] = (1.0 + float(s)) / 2.0
+
+    # sources in parallel: their reads share _INT8_POOL
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(by_source))) as ex:
+        list(ex.map(score_source, by_source.items()))
+
+    have = ~np.isnan(new)
+    if not have.any():
+        return candidates
+    boost = np.array([c.get("boost", 0.0) for c in head])
+    old = np.array([c["score"] for c in head]) - boost
+    if have.sum() >= 20 and np.ptp(old[have]) > 1e-6:
+        slope, icept = np.polyfit(old[have], new[have], 1)
+    else:
+        slope, icept = 1.0, float(np.median(new[have] - old[have]))
+    slope = max(slope, 1e-3)
+    est = ~have
+    new[est] = slope * old[est] + icept
+    for c, s, b in zip(head, new, boost):
+        c["score"] = float(s + b)
+    head.sort(key=lambda x: x["score"], reverse=True)
+    floor = head[-1]["score"]
+    for c in tail:
+        b = c.get("boost", 0.0)
+        c["score"] = float(min(slope * (c["score"] - b) + icept + b, floor))
+    LOGGER.info(f"int8 rescoring: {int(have.sum()):,}/{len(head):,} head candidates re-scored")
+    return head + tail
+
+
+def _candidate_batches(candidates, batch_size, date_filter, searchers, screened=0):
     """
     Yields score-ordered batches of candidates for full-row fetching.
     With a date filter, candidates are first screened on the date column alone,
     probing ever larger slices so a rare date range takes a few rounds, not
-    hundreds of 50-row rounds.
+    hundreds of 50-row rounds. The first `screened` candidates already passed.
     """
     if not date_filter:
         for i in range(0, len(candidates), batch_size):
@@ -1193,8 +1369,8 @@ def _candidate_batches(candidates, batch_size, date_filter, searchers):
         return
 
     start_date, end_date = date_filter
-    pending: list = []
-    pos, probe = 0, max(200, batch_size * 4)
+    pending: list = list(candidates[:screened])
+    pos, probe = screened, max(200, batch_size * 4)
     while pos < len(candidates) or pending:
         if len(pending) < batch_size and pos < len(candidates):
             chunk = candidates[pos:pos + probe]
@@ -1253,7 +1429,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                 if c is None:
                     candidates.append(e)
                 else:
-                    c["score"] = max(c["score"], e["score"])
+                    if e["score"] > c["score"]:
+                        c["score"], c["boost"] = e["score"], e["boost"]
                     c["matched_terms"] = e["matched_terms"]
         for c in candidates:
             c["source"] = source_name
@@ -1278,8 +1455,19 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                 except Exception as e:
                     LOGGER.error(f"Error searching source: {e}")
 
-    # --- 2. Sort globally by score ---
+    # --- 2. Sort globally by score; re-rank the best candidates with int8 vectors ---
     all_global_candidates.sort(key=lambda x: x["score"], reverse=True)
+    screened = 0
+    if date_filter:
+        # Re-rank the best candidates that pass the date filter, not the best overall.
+        passing, pos = _screen_by_date(all_global_candidates, max(INT8_RESCORE_DEPTH, 4 * top_k),
+                                       searchers, start_date, end_date)
+        all_global_candidates = passing + all_global_candidates[pos:]
+        screened = len(passing)
+    if query_float is not None and INT8_RESCORE_DEPTH > 0:
+        with log_time("int8 rescoring"):
+            all_global_candidates = _rescore_head_int8(
+                all_global_candidates, max(INT8_RESCORE_DEPTH, 4 * top_k), searchers, query_float)
 
     final_valid_rows = []
     seen_identifiers: dict = {}   # identifier (DOI / title) -> index in final_valid_rows
@@ -1287,7 +1475,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     # --- 3. Batched fetch + filter + live dedup ---
     batch_size = max(50, top_k)
 
-    for batch_candidates in _candidate_batches(all_global_candidates, batch_size, date_filter, searchers):
+    for batch_candidates in _candidate_batches(all_global_candidates, batch_size, date_filter, searchers,
+                                               screened):
         if len(final_valid_rows) >= top_k:
             break
 
@@ -1423,8 +1612,8 @@ def similar_search(refs, all_configs, search_configs, top_k, start_date=None, en
                    use_high_quality=False):
     """
     Finds documents similar to one or more example documents (refs like
-    'PubMed:123'). The examples' stored ±1 codes are averaged into a float
-    query, so several examples act as one "more like these" query. Returns
+    'PubMed:123'). The examples' stored vectors (int8, else their ±1 codes) are
+    averaged into a float query, so several examples act as one "more like these" query. Returns
     (results DataFrame without the examples, list of example row dicts,
     packed query code).
     """
@@ -1439,7 +1628,13 @@ def similar_search(refs, all_configs, search_configs, top_k, start_date=None, en
         codes, found = searcher.codes_for([cid])
         if not found[0]:
             raise UnknownReference(f"{ref} does not exist")
-        signs.append(np.unpackbits(codes[0]).astype(np.float32) * 2 - 1)
+        codes8, ok8 = searcher.checked_int8_rows([cid])
+        if ok8[0]:
+            lo, step = int8_codes.load_calibration()
+            v = (codes8[0].astype(np.float32) + 128) * step + lo
+        else:
+            v = np.unpackbits(codes[0]).astype(np.float32) * 2 - 1
+        signs.append(v / max(np.linalg.norm(v), 1e-12))
         row = searcher.fetch_rows([{"corpus_id": cid, "score": 1.0}])
         seed = row.iloc[0].to_dict() if not row.empty else {"corpus_id": cid}
         seed["source"] = source
