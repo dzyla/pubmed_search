@@ -61,3 +61,31 @@ files outside the subset).
 
 Index (all sources): 9.4M identifiers, 113M postings, ~0.8 GB on disk,
 memory-mapped on the server; built nightly on the desktop in ~15 min.
+
+## int8 rescoring — 2026-10-15
+
+Benchmark (`~/emb_bench`, 400k-document sample of all sources, 100 topical queries
+with pooled graded judgments): binary search + float-query-vs-bits rescoring
+nDCG@10 0.661 → binary search + int8 rescoring **0.725** (69 queries better, 31 worse).
+int8 equals exact float rescoring (0.7172 vs 0.7181). Keeping the BGE query prefix
+on PubMed documents was better than dropping it (0.717 vs 0.703), so the re-embed
+used the same recipe; every one of the 56.4M re-embedded rows matched its stored
+binary code (median sign agreement 1.000).
+
+Calibration (`int8_calibration.npy`): per-dimension 0.01–99.99 percentile range of
+the 400k sample (min/max and 0.1–99.9 were equivalent; 1–99 lost 0.007 nDCG).
+
+Depth (`~/reembed/depth_test2.py`, 250 queries, all ~56M vectors, production code):
+agreement with re-scoring all ~42k candidates of a search, before dedup —
+
+| Re-scored | top-1 | top-10 | top-50 |
+|---|---|---|---|
+| 0 (binary only) | 0.59 | 0.56 | 0.56 |
+| 250 | 1.00 | 0.985 | 0.898 |
+| 500 | 1.00 | 0.994 | 0.957 |
+| **1,000 (default)** | 1.00 | 0.999 | 0.984 |
+| 2,000 | 1.00 | 1.000 | 0.997 |
+
+The bits → int8 score slope is 0.99 (IQR 0.92–1.07), so `EXACT_BOOST` keeps its value.
+On the server, re-scoring 1,000 candidates takes 0.06–0.09 s (cold reads included).
+Re-embedding everything: 56.4M documents in 4.9 h on the RTX 5080 (`fast_embed.py`).
