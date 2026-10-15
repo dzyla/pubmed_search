@@ -131,15 +131,20 @@ class PmcIndex:
 
     def lookup(self, pmids) -> list:
         """PMCID strings ('PMC123') or None, aligned with pmids."""
-        if self._pmid is None:
+        if self._pmid is None or not len(self._pmid):
             return [None] * len(pmids)
-        out = []
+        keys = []
         for p in pmids:
             try:
-                p = int(p)
+                keys.append(int(p))
             except (TypeError, ValueError):
-                out.append(None)
-                continue
-            i = int(np.searchsorted(self._pmid, p))
-            out.append(f"PMC{int(self._pmcid[i])}" if i < len(self._pmid) and self._pmid[i] == p else None)
-        return out
+                keys.append(-1)
+        keys = np.array(keys, dtype=np.int64)
+        info = np.iinfo(self._pmid.dtype)
+        valid = (keys >= info.min) & (keys <= info.max)
+        # Search with the table's own dtype: a Python int would make numpy cast the
+        # whole memory-mapped table (11.6M ids) to int64 on every call.
+        idx = np.searchsorted(self._pmid, np.where(valid, keys, 0).astype(self._pmid.dtype))
+        idx = np.minimum(idx, len(self._pmid) - 1)
+        hit = valid & (np.asarray(self._pmid[idx]) == keys)
+        return [f"PMC{int(self._pmcid[i])}" if h else None for i, h in zip(idx, hit)]

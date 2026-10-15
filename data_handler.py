@@ -2,25 +2,25 @@ import os
 import logging
 import concurrent.futures
 
-import pyarrow.dataset as ds
+import numpy as np
+import pyarrow.parquet as pq
 import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lock-free parquet dataset + column cache
+# Lock-free parquet metadata cache
 #
-# Maps parquet_path -> (PyArrow Dataset, columns_to_fetch list).
+# Maps parquet_path -> (FileMetaData, row-group start rows, wishlist columns, signature).
+# A fetch opens the file with the cached footer and reads only the row groups that
+# hold the wanted rows. (pyarrow's Dataset.take reads nearly the whole file for one
+# row: 13 MB / 27 ms cold for a PubMed file, vs 0.2 MB / 2 ms for one 500-row group,
+# measured on the server 2026-10-15.) No file stays open between fetches.
 #
-# Why no lock?
-#   CPython's GIL makes dict.get() and dict[k]=v atomic.  Two threads may
-#   rarely both miss the cache for the same path and both compute+store an
-#   entry — that's harmless (deterministic output, last writer wins).
-#   Every later call is a plain dict lookup with zero lock overhead.
-#
-# Memory cost: a few KB per file (schema metadata only, no row data cached).
+# Why no lock? CPython's GIL makes dict.get() and dict[k]=v atomic; two threads may
+# rarely both miss and both store an entry — harmless (same content, last writer wins).
 # ---------------------------------------------------------------------------
-_PARQUET_DATASET_CACHE: dict = {}
+_PARQUET_META_CACHE: dict = {}
 
 _WISHLIST = frozenset({
     "title", "abstract", "date", "doi", "authors",
@@ -33,26 +33,54 @@ _WISHLIST = frozenset({
 })
 
 
-def _get_or_open_dataset(parquet_path: str):
+def _parquet_meta(parquet_path: str):
     """
-    Returns cached (Dataset, columns_to_fetch). No lock — GIL is sufficient.
-    Re-opens the file when its size or mtime changed (e.g. a weekly update
-    rewrote it in place): a stale Dataset would read with old row-group offsets.
+    Returns cached (FileMetaData, row-group start rows, column names, wishlist columns).
+    Re-reads the footer when the file's size or mtime changed (e.g. a weekly update
+    rewrote it in place): stale row-group offsets would read garbage.
     """
     st = os.stat(parquet_path)
     signature = (st.st_mtime_ns, st.st_size)
-    entry = _PARQUET_DATASET_CACHE.get(parquet_path)
-    if entry is None or entry[2] != signature:
-        dataset = ds.dataset(parquet_path, format="parquet")
-        cols = list(_WISHLIST.intersection(set(dataset.schema.names)))
-        entry = (dataset, cols, signature)
-        _PARQUET_DATASET_CACHE[parquet_path] = entry
-    return entry[0], entry[1]
+    entry = _PARQUET_META_CACHE.get(parquet_path)
+    if entry is None or entry[4] != signature:
+        meta = pq.read_metadata(parquet_path)
+        starts = np.cumsum([0] + [meta.row_group(i).num_rows for i in range(meta.num_row_groups)])
+        names = meta.schema.to_arrow_schema().names
+        entry = (meta, starts, names, [c for c in names if c in _WISHLIST], signature)
+        _PARQUET_META_CACHE[parquet_path] = entry
+    return entry[:4]
+
+
+def read_parquet_rows(parquet_path: str, rows, columns=None):
+    """
+    ({column: [values]}, valid) for the given row numbers, in that order, reading only
+    the row groups that contain them. Rows outside the file are not valid (values None).
+    """
+    meta, starts, names, wishlist = _parquet_meta(parquet_path)
+    cols = wishlist if columns is None else [c for c in columns if c in names]
+    rows = np.asarray(rows, dtype=np.int64)
+    valid = (rows >= 0) & (rows < starts[-1])
+    out = {c: [None] * len(rows) for c in cols}
+    if not valid.any():
+        return out, valid
+    groups = np.searchsorted(starts, np.where(valid, rows, 0), side="right") - 1
+    pf = pq.ParquetFile(parquet_path, metadata=meta)
+    try:
+        for g in np.unique(groups[valid]):
+            pos = np.flatnonzero(valid & (groups == g))
+            part = pf.read_row_group(int(g), columns=cols).take(rows[pos] - starts[g]).to_pydict()
+            for c in cols:
+                col = out[c]
+                for j, v in zip(pos, part[c]):
+                    col[j] = v
+    finally:
+        pf.close()
+    return out, valid
 
 
 def clear_parquet_cache():
-    """Clears the cached parquet datasets to allow reading new data."""
-    _PARQUET_DATASET_CACHE.clear()
+    """Clears the cached parquet footers to allow reading new data."""
+    _PARQUET_META_CACHE.clear()
     LOGGER.info("Cleared Parquet dataset cache.")
 
 
@@ -110,9 +138,8 @@ def fetch_specific_rows(
 
     Optimisations vs original:
     - intervals pre-built once in ChunkedSearcher (no rebuild per call)
-    - parquet schema + column list cached lock-free (no footer re-read)
-    - to_pydict() replaces to_pandas() — skips numpy/dtype/index overhead
-      for the small per-file result tables
+    - parquet footer + column list cached lock-free (no footer re-read)
+    - reads only the row groups holding the wanted rows (read_parquet_rows)
     """
     if intervals is None:
         intervals = build_sorted_intervals_from_metadata(metadata)
@@ -140,17 +167,13 @@ def fetch_specific_rows(
 
         local_indices = [r[0] for r in requests]
         try:
-            dataset, columns_to_fetch = _get_or_open_dataset(parquet_path)
-            if columns is not None:
-                columns_to_fetch = [c for c in columns if c in dataset.schema.names]
-            table = dataset.scanner(columns=columns_to_fetch).take(local_indices)
-
-            # to_pydict() is faster than to_pandas() for 1-10 row tables:
-            # no numpy array allocation, no dtype inference, no DataFrame index.
-            raw = table.to_pydict()
+            raw, valid = read_parquet_rows(parquet_path, local_indices, columns)
+            if not valid.all():
+                LOGGER.error(f"{parquet_path}: {int((~valid).sum())} requested row(s) beyond its "
+                             f"{_parquet_meta(parquet_path)[1][-1]:,} rows")
             results = []
             for i, (_, hit_info) in enumerate(requests):
-                if i < len(table):
+                if valid[i]:
                     row = {k: raw[k][i] for k in raw}
                     row["score"] = hit_info["score"]
                     row["corpus_id"] = hit_info["corpus_id"]

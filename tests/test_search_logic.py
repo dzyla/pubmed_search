@@ -301,13 +301,27 @@ def test_parquet_rewritten_in_place_is_reread(tmp_path):
 
     path = str(tmp_path / "f.parquet")
     pd.DataFrame({"title": ["old"] * 3, "abstract": ["a"] * 3}).to_parquet(path)
-    first, _ = data_handler._get_or_open_dataset(path)
-    assert first.to_table().column("title").to_pylist() == ["old"] * 3
+    first, _ = data_handler.read_parquet_rows(path, [0, 1, 2])
+    assert first["title"] == ["old"] * 3
 
     pd.DataFrame({"title": ["new title"] * 5, "abstract": ["b"] * 5}).to_parquet(path)
     os.utime(path, (2e9, 2e9))
-    second, _ = data_handler._get_or_open_dataset(path)
-    assert second.to_table().column("title").to_pylist() == ["new title"] * 5
+    second, _ = data_handler.read_parquet_rows(path, [4, 0])
+    assert second["title"] == ["new title"] * 2
+
+
+def test_read_parquet_rows_keeps_order_across_row_groups(tmp_path):
+    import data_handler
+
+    path = str(tmp_path / "g.parquet")
+    pd.DataFrame({"title": [f"t{i}" for i in range(25)], "doi": [str(i) for i in range(25)],
+                  "other": range(25)}).to_parquet(path, row_group_size=4)
+    out, valid = data_handler.read_parquet_rows(path, [17, 2, 30, 3, 24, -1])
+    assert valid.tolist() == [True, True, False, True, True, False]
+    assert out["title"] == ["t17", "t2", None, "t3", "t24", None]
+    assert "other" not in out                       # only the columns the app shows
+    out, _ = data_handler.read_parquet_rows(path, [5], columns=["doi", "missing"])
+    assert out == {"doi": ["5"]}
 
 
 def test_newest_pubmed_version_wins():

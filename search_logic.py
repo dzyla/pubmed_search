@@ -255,7 +255,7 @@ class ChunkedSearcher:
         self.combined_data_file = config.get("combined_data_file")
         self.chunk_size_bytes = config.get("chunk_size_bytes", 1 << 30)
         self.int8_dir = config.get("int8_directory") or int8_codes.int8_dir(self.embeddings_dir)
-        self._int8_files: dict = {}     # stem -> (fd, data offset, rows, (mtime_ns, size))
+        self._int8_files: dict = {}     # stem -> (path, data offset, rows, (mtime_ns, size))
         self._int8_lock = threading.Lock()
         self.was_updated = False
 
@@ -335,37 +335,32 @@ class ChunkedSearcher:
     # int8 vectors (int8_codes.py), read per candidate from <stem>.npy files
     # ------------------------------------------------------------------
 
-    def _int8_file(self, stem: str):
-        """(fd, data offset, rows) of a stem's int8 file, reopened when the file changed; None if absent."""
+    def _int8_header(self, stem: str):
+        """(path, data offset, rows) of a stem's int8 file, re-read when the file changed; None if absent.
+        No file stays open: PubMed alone has ~1,700 files and the service may open 1,024."""
         path = os.path.join(self.int8_dir, f"{stem}.npy")
         try:
             st = os.stat(path)
         except OSError:
             return None
         sig = (st.st_mtime_ns, st.st_size)
+        entry = self._int8_files.get(stem)
+        if entry is not None and entry[3] == sig:
+            return entry[:3]
+        try:
+            with open(path, "rb") as f:
+                version = np.lib.format.read_magic(f)
+                shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+                offset = f.tell()
+        except Exception as e:
+            LOGGER.warning(f"Cannot read int8 file {path}: {e}")
+            return None
+        if dtype != np.int8 or len(shape) != 2 or shape[1] != int8_codes.DIM or fortran:
+            LOGGER.warning(f"Ignoring int8 file {path}: shape {shape}, dtype {dtype}")
+            return None
         with self._int8_lock:
-            entry = self._int8_files.get(stem)
-            if entry is not None and entry[3] == sig:
-                return entry[:3]
-            try:
-                with open(path, "rb") as f:
-                    version = np.lib.format.read_magic(f)
-                    shape, fortran, dtype = np.lib.format._read_array_header(f, version)
-                    offset = f.tell()
-                if dtype != np.int8 or len(shape) != 2 or shape[1] != int8_codes.DIM or fortran:
-                    LOGGER.warning(f"Ignoring int8 file {path}: shape {shape}, dtype {dtype}")
-                    return None
-                fd = os.open(path, os.O_RDONLY)
-                if hasattr(os, "posix_fadvise"):
-                    # single-row reads: no readahead (it would read ~128 KB per 384-byte row)
-                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
-            except Exception as e:
-                LOGGER.warning(f"Cannot open int8 file {path}: {e}")
-                return None
-            if entry is not None:
-                os.close(entry[0])
-            self._int8_files[stem] = (fd, offset, shape[0], sig)
-            return fd, offset, shape[0]
+            self._int8_files[stem] = (path, offset, shape[0], sig)
+        return path, offset, shape[0]
 
     def int8_rows(self, gids):
         """
@@ -391,16 +386,23 @@ class ChunkedSearcher:
 
         def read(stem_rows):
             stem, rows = stem_rows
-            f = self._int8_file(stem)
-            if f is None:
+            h = self._int8_header(stem)
+            if h is None:
                 return
-            fd, offset, n = f
-            for i, r in rows:
-                if r < n:
-                    buf = os.pread(fd, row_bytes, offset + r * row_bytes)
-                    if len(buf) == row_bytes:
-                        codes[i] = np.frombuffer(buf, dtype=np.int8)
-                        found[i] = True
+            path, offset, n = h
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                if hasattr(os, "posix_fadvise"):
+                    # single-row reads: no readahead (it would read ~128 KB per 384-byte row)
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+                for i, r in rows:
+                    if r < n:
+                        buf = os.pread(fd, row_bytes, offset + r * row_bytes)
+                        if len(buf) == row_bytes:
+                            codes[i] = np.frombuffer(buf, dtype=np.int8)
+                            found[i] = True
+            finally:
+                os.close(fd)
 
         try:
             list(_INT8_POOL.map(read, by_stem.items()))

@@ -27,7 +27,7 @@ def needs_rechunk(path: str, target: int) -> bool:
 def rechunk(path: str, target: int) -> None:
     table = pq.read_table(path)
     tmp = f"{path}.rechunk-tmp"
-    pq.write_table(table, tmp, row_group_size=target, compression="snappy", write_page_index=True)
+    pq.write_table(table, tmp, row_group_size=target, compression="zstd", write_page_index=True)
     check = pq.read_table(tmp)
     if check.num_rows != table.num_rows or not check.slice(0, 100).equals(table.slice(0, 100)) \
             or not check.slice(table.num_rows - 100).equals(table.slice(table.num_rows - 100)):
