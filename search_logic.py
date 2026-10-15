@@ -61,6 +61,24 @@ _INT8_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_p
 _INT8_MIN_SIGN_AGREEMENT = 0.9
 
 
+def _raise_open_file_limit() -> int:
+    """Raises this process's soft open-file limit to the hard limit (≤ 65,536); returns the soft limit."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            soft = want
+        return soft
+    except Exception:
+        return 1024
+
+
+# open int8 files per source; a quarter of the limit leaves room for parquet reads and sockets
+_INT8_MAX_OPEN = max(64, min(4096, _raise_open_file_limit() // 4))
+
+
 def _pmc_index(configs):
     root = next((c.get("aux_index_root") for c in configs if c and c.get("aux_index_root")), None)
     if not root:
@@ -198,6 +216,7 @@ def warm_up_indexes(configs, background: bool = True):
                     actual_rows = chunk_info.get("actual_rows")
                     if actual_rows and os.path.exists(chunk_path):
                         _get_or_build_faiss_index(chunk_path, actual_rows, embedding_dim)
+                searcher.open_int8_files()
             except Exception as exc:
                 LOGGER.error(f"Warm-up failed for {config.get('chunk_dir', '?')}: {exc}")
         LOGGER.info("FAISS index warm-up complete.")
@@ -244,6 +263,93 @@ def copy_file_into_chunk(file_info, memmap_array, offset):
         return None
 
 
+class _Int8Files:
+    """
+    Open int8 files of one source, at most `max_open` at a time (least recently used
+    closed first). Opening a file per read costs more than the read, so they stay open:
+    the backend unit allows 65,536 open files (PubMed has ~1,700 embedding files).
+    A file in use by a reader is never closed under it; refresh() (hourly update
+    check) drops files that changed since they were opened.
+    """
+
+    def __init__(self, directory: str, max_open: int):
+        self.dir = directory
+        self.max_open = max_open
+        self._lock = threading.Lock()
+        self._open: "OrderedDict" = OrderedDict()   # stem -> entry dict
+
+    def _sig(self, path):
+        st = os.stat(path)
+        return st.st_mtime_ns, st.st_size
+
+    def acquire(self, stem: str):
+        """An entry {fd, offset, rows} for reading (release() it after), or None if absent/invalid."""
+        with self._lock:
+            e = self._open.get(stem)
+            if e is not None:
+                self._open.move_to_end(stem)
+                e["users"] += 1
+                return e
+        path = os.path.join(self.dir, f"{stem}.npy")
+        try:
+            sig = self._sig(path)
+            with open(path, "rb") as f:
+                version = np.lib.format.read_magic(f)
+                shape, fortran, dtype = np.lib.format._read_array_header(f, version)
+                offset = f.tell()
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            LOGGER.warning(f"Cannot read int8 file {path}: {exc}")
+            return None
+        if dtype != np.int8 or len(shape) != 2 or shape[1] != int8_codes.DIM or fortran:
+            LOGGER.warning(f"Ignoring int8 file {path}: shape {shape}, dtype {dtype}")
+            return None
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError as exc:            # e.g. too many open files: rank by binary codes
+            LOGGER.warning(f"Cannot open int8 file {path}: {exc}")
+            return None
+        if hasattr(os, "posix_fadvise"):
+            # single-row reads: no readahead (it would read ~128 KB per 384-byte row)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+        with self._lock:
+            e = self._open.get(stem)
+            if e is not None:               # another thread opened it meanwhile
+                os.close(fd)
+                e["users"] += 1
+                return e
+            e = {"fd": fd, "offset": offset, "rows": shape[0], "sig": sig, "users": 1, "dropped": False}
+            self._open[stem] = e
+            if len(self._open) > self.max_open:
+                for old_stem in [k for k, v in self._open.items() if v["users"] == 0][:len(self._open) - self.max_open]:
+                    os.close(self._open.pop(old_stem)["fd"])
+            return e
+
+    def release(self, e):
+        with self._lock:
+            e["users"] -= 1
+            if e["dropped"] and e["users"] == 0:
+                os.close(e["fd"])
+
+    def refresh(self):
+        """Forgets files that were replaced or rewritten since they were opened."""
+        with self._lock:
+            items = list(self._open.items())
+        for stem, e in items:
+            try:
+                changed = self._sig(os.path.join(self.dir, f"{stem}.npy")) != e["sig"]
+            except OSError:
+                changed = True
+            if changed:
+                with self._lock:
+                    if self._open.get(stem) is e:
+                        del self._open[stem]
+                        e["dropped"] = True
+                        if e["users"] == 0:
+                            os.close(e["fd"])
+
+
 class ChunkedSearcher:
     def __init__(self, config):
         self.config = config
@@ -255,8 +361,7 @@ class ChunkedSearcher:
         self.combined_data_file = config.get("combined_data_file")
         self.chunk_size_bytes = config.get("chunk_size_bytes", 1 << 30)
         self.int8_dir = config.get("int8_directory") or int8_codes.int8_dir(self.embeddings_dir)
-        self._int8_files: dict = {}     # stem -> (path, data offset, rows, (mtime_ns, size))
-        self._int8_lock = threading.Lock()
+        self._int8_files = _Int8Files(self.int8_dir, _INT8_MAX_OPEN)
         self.was_updated = False
 
         self._ensure_chunks_exist()
@@ -335,33 +440,6 @@ class ChunkedSearcher:
     # int8 vectors (int8_codes.py), read per candidate from <stem>.npy files
     # ------------------------------------------------------------------
 
-    def _int8_header(self, stem: str):
-        """(path, data offset, rows) of a stem's int8 file, re-read when the file changed; None if absent.
-        No file stays open: PubMed alone has ~1,700 files and the service may open 1,024."""
-        path = os.path.join(self.int8_dir, f"{stem}.npy")
-        try:
-            st = os.stat(path)
-        except OSError:
-            return None
-        sig = (st.st_mtime_ns, st.st_size)
-        entry = self._int8_files.get(stem)
-        if entry is not None and entry[3] == sig:
-            return entry[:3]
-        try:
-            with open(path, "rb") as f:
-                version = np.lib.format.read_magic(f)
-                shape, fortran, dtype = np.lib.format._read_array_header(f, version)
-                offset = f.tell()
-        except Exception as e:
-            LOGGER.warning(f"Cannot read int8 file {path}: {e}")
-            return None
-        if dtype != np.int8 or len(shape) != 2 or shape[1] != int8_codes.DIM or fortran:
-            LOGGER.warning(f"Ignoring int8 file {path}: shape {shape}, dtype {dtype}")
-            return None
-        with self._int8_lock:
-            self._int8_files[stem] = (path, offset, shape[0], sig)
-        return path, offset, shape[0]
-
     def int8_rows(self, gids):
         """
         int8 vectors for global row ids -> (codes (n, 384) int8, found bool (n,)).
@@ -384,31 +462,36 @@ class ChunkedSearcher:
             by_stem.setdefault(iv["source_stem"], []).append((i, iv["source_local_start"] + int(g - iv["global_start"])))
         row_bytes = int8_codes.DIM
 
-        def read(stem_rows):
-            stem, rows = stem_rows
-            h = self._int8_header(stem)
-            if h is None:
-                return
-            path, offset, n = h
-            fd = os.open(path, os.O_RDONLY)
-            try:
-                if hasattr(os, "posix_fadvise"):
-                    # single-row reads: no readahead (it would read ~128 KB per 384-byte row)
-                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
-                for i, r in rows:
-                    if r < n:
-                        buf = os.pread(fd, row_bytes, offset + r * row_bytes)
-                        if len(buf) == row_bytes:
-                            codes[i] = np.frombuffer(buf, dtype=np.int8)
-                            found[i] = True
-            finally:
-                os.close(fd)
+        def read(batch):
+            for stem, rows in batch:
+                e = self._int8_files.acquire(stem)
+                if e is None:
+                    continue
+                try:
+                    for i, r in rows:
+                        if r < e["rows"]:
+                            buf = os.pread(e["fd"], row_bytes, e["offset"] + r * row_bytes)
+                            if len(buf) == row_bytes:
+                                codes[i] = np.frombuffer(buf, dtype=np.int8)
+                                found[i] = True
+                finally:
+                    self._int8_files.release(e)
 
+        # a few tasks of many files each: one task per file costs more than its reads
+        items = list(by_stem.items())
+        n_tasks = min(len(items), _INT8_POOL._max_workers)
         try:
-            list(_INT8_POOL.map(read, by_stem.items()))
+            list(_INT8_POOL.map(read, [items[k::n_tasks] for k in range(n_tasks)]))
         except Exception as e:
             LOGGER.warning(f"int8 read failed in {self.chunk_dir}: {type(e).__name__}: {e}")
         return codes, found
+
+    def open_int8_files(self):
+        """Opens the int8 files up front so the first searches do not pay for it."""
+        for stem in sorted({iv["source_stem"] for iv in self.intervals})[:self._int8_files.max_open]:
+            e = self._int8_files.acquire(stem)
+            if e is not None:
+                self._int8_files.release(e)
 
     def checked_int8_rows(self, gids):
         """int8_rows, keeping only rows whose signs match the stored binary code."""
@@ -574,6 +657,7 @@ class ChunkedSearcher:
         Returns True if chunks were updated or metadata was externally reloaded.
         """
         self.was_updated = False
+        self._int8_files.refresh()
         externally_changed = self._reload_metadata_if_externally_changed()
         self._ensure_chunks_exist()
         if self.data_problem and not (self.was_updated or externally_changed):
