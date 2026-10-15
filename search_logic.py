@@ -188,6 +188,22 @@ def get_or_create_searcher(config: dict) -> "ChunkedSearcher":
         event.set()
 
 
+def _preload_dates(configs):
+    """Fills every source's in-RAM dates at low CPU priority (date filters work before, just slower)."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 15)   # this thread only
+    except Exception:
+        pass
+    t0 = time.time()
+    for config in configs:
+        if config:
+            try:
+                get_or_create_searcher(config).load_all_dates()
+            except Exception as exc:
+                LOGGER.error(f"Date preload failed for {config.get('chunk_dir', '?')}: {exc}")
+    LOGGER.info(f"Publication dates loaded in {time.time() - t0:.0f}s.")
+
+
 def warm_up_indexes(configs, background: bool = True):
     """
     Pre-builds FAISS indexes for all sources so the first real search is fast.
@@ -220,6 +236,7 @@ def warm_up_indexes(configs, background: bool = True):
             except Exception as exc:
                 LOGGER.error(f"Warm-up failed for {config.get('chunk_dir', '?')}: {exc}")
         LOGGER.info("FAISS index warm-up complete.")
+        _preload_dates(configs)
 
     if background:
         t = threading.Thread(target=_build, daemon=True, name="faiss-warmup")
@@ -364,6 +381,7 @@ class ChunkedSearcher:
         self.chunk_size_bytes = config.get("chunk_size_bytes", 1 << 30)
         self.int8_dir = config.get("int8_directory") or int8_codes.int8_dir(self.embeddings_dir)
         self._int8_files = _Int8Files(self.int8_dir, _INT8_MAX_OPEN)
+        self._dates: dict = {}          # parquet path -> (int16 days since 1970 per row, file signature)
         self.was_updated = False
 
         self._ensure_chunks_exist()
@@ -487,6 +505,95 @@ class ChunkedSearcher:
         except Exception as e:
             LOGGER.warning(f"int8 read failed in {self.chunk_dir}: {type(e).__name__}: {e}")
         return codes, found
+
+    def _rows_by_stem(self, gids):
+        """{stem: (positions in gids, row numbers in that stem's files)} for global row ids."""
+        gids = np.asarray(gids, dtype=np.int64)
+        if not len(gids) or not self.intervals:
+            return {}
+        ivs = self.intervals
+        starts = np.fromiter((iv["global_start"] for iv in ivs), np.int64, len(ivs))
+        ends = np.fromiter((iv["global_end"] for iv in ivs), np.int64, len(ivs))
+        local0 = np.fromiter((iv["source_local_start"] for iv in ivs), np.int64, len(ivs))
+        p = np.searchsorted(starts, gids, side="right") - 1
+        ok = p >= 0
+        p = np.where(ok, p, 0)
+        ok &= gids <= ends[p]
+        idx = np.flatnonzero(ok)
+        order = idx[np.argsort(p[idx], kind="stable")]
+        groups, first = np.unique(p[order], return_index=True)
+        out = {}
+        for k, pos in zip(groups, np.split(order, first[1:])):
+            out[ivs[k]["source_stem"]] = (pos, local0[k] + gids[pos] - starts[k])
+        return out
+
+    # ------------------------------------------------------------------
+    # Publication dates in RAM (2 bytes/row) for date filters
+    # ------------------------------------------------------------------
+
+    def _parquet_path(self, stem: str) -> str:
+        path = os.path.join(self.data_folder, f"{stem}.parquet")
+        if not os.path.exists(path) and self.combined_data_file:
+            return self.combined_data_file
+        return path
+
+    def _stem_dates(self, stem: str, min_rows: int = 0):
+        """
+        (int16 days since 1970 per row of a stem's parquet, {row: days} for dates outside
+        int16's 1880-2059, e.g. PubMed's 1818 records); cached. NO_DATE where unknown.
+        """
+        path = self._parquet_path(stem)
+        entry = self._dates.get(path)
+        if entry is not None and len(entry[0]) >= min_rows:
+            return entry[0], entry[1]
+        import pyarrow.parquet as pq
+        st = os.stat(path)
+        names = pq.read_schema(path).names
+        col = next((c for c in _DATE_COLUMNS if c in names), None)
+        outliers = {}
+        if col is None:
+            days = np.full(pq.read_metadata(path).num_rows, NO_DATE, dtype=np.int16)
+        else:
+            d = pd.to_datetime(pq.read_table(path, columns=[col]).column(0).to_pandas(), errors="coerce")
+            raw = d.values.astype("datetime64[D]").astype(np.int64)
+            nat = d.isna().to_numpy()
+            far = ~nat & ((raw <= _DATE_OUT_OF_RANGE) | (raw > np.iinfo(np.int16).max))
+            outliers = {int(r): int(raw[r]) for r in np.flatnonzero(far)}
+            days = np.where(far, _DATE_OUT_OF_RANGE, raw)
+            days[nat] = NO_DATE
+            days = days.astype(np.int16)
+        self._dates[path] = (days, outliers, (st.st_mtime_ns, st.st_size))
+        return days, outliers
+
+    def dates_for(self, gids) -> np.ndarray:
+        """Publication day (days since 1970, int32) per global row id; NO_DATE if unknown."""
+        out = np.full(len(gids), NO_DATE, dtype=np.int32)
+        for stem, (pos, rows) in self._rows_by_stem(gids).items():
+            days, outliers = self._stem_dates(stem, int(rows.max()) + 1)
+            ok = rows < len(days)
+            out[pos[ok]] = days[rows[ok]]
+            if outliers:
+                for j in np.flatnonzero(out[pos] == _DATE_OUT_OF_RANGE):
+                    out[pos[j]] = outliers.get(int(rows[j]), NO_DATE)
+        return out
+
+    def load_all_dates(self):
+        for stem in sorted({iv["source_stem"] for iv in self.intervals}):
+            try:
+                self._stem_dates(stem)
+            except Exception as e:
+                LOGGER.warning(f"Could not load dates of {stem}: {e}")
+
+    def _refresh_dates(self):
+        """Forgets cached dates of parquet files that changed."""
+        for path, (_, _, sig) in list(self._dates.items()):
+            try:
+                st = os.stat(path)
+                if (st.st_mtime_ns, st.st_size) == sig:
+                    continue
+            except OSError:
+                pass
+            self._dates.pop(path, None)
 
     def open_int8_files(self):
         """Opens the int8 files up front so the first searches do not pay for it."""
@@ -660,6 +767,7 @@ class ChunkedSearcher:
         """
         self.was_updated = False
         self._int8_files.refresh()
+        self._refresh_dates()
         externally_changed = self._reload_metadata_if_externally_changed()
         self._ensure_chunks_exist()
         if self.data_problem and not (self.was_updated or externally_changed):
@@ -1336,16 +1444,19 @@ def combined_search_orchestrator(
 
 
 _DATE_COLUMNS = ["date", "update_date", "posted"]
+NO_DATE = np.iinfo(np.int16).min      # ChunkedSearcher.dates_for: unknown date
+_DATE_OUT_OF_RANGE = NO_DATE + 1       # stored int16 marker: exact date kept in a side table
 
 
 def _filter_candidates_by_date(candidates, searchers, start_date, end_date) -> list:
     """
-    Keeps candidates whose publication date is in range, reading only the date
-    column from parquet (much cheaper than full rows with abstracts).
-    Preserves the input (score) order.
+    Keeps candidates whose publication date is in range, using each source's
+    in-RAM dates (ChunkedSearcher.dates_for; first use of a file reads its date
+    column). Preserves the input (score) order.
     """
-    start = pd.to_datetime(start_date) if start_date else None
-    end = pd.to_datetime(end_date) if end_date else None
+    epoch = pd.Timestamp("1970-01-01")
+    lo = (pd.to_datetime(start_date) - epoch).days if start_date else None
+    hi = (pd.to_datetime(end_date) - epoch).days if end_date else None
     by_source: dict = {}
     for c in candidates:
         by_source.setdefault(c["source"], []).append(c)
@@ -1356,22 +1467,16 @@ def _filter_candidates_by_date(candidates, searchers, start_date, end_date) -> l
         if not searcher:
             continue
         try:
-            df = searcher.fetch_rows(subset, columns=_DATE_COLUMNS)
+            days = searcher.dates_for([c["corpus_id"] for c in subset])
         except Exception as e:
             LOGGER.error(f"Date pre-filter failed for {source_name}: {e}")
             continue
-        if df.empty:
-            continue
-        date_col = next((c for c in _DATE_COLUMNS if c in df.columns), None)
-        if date_col is None:
-            continue
-        dates = pd.to_datetime(df[date_col], errors="coerce")
-        mask = dates.notna()
-        if start is not None:
-            mask &= dates >= start
-        if end is not None:
-            mask &= dates <= end
-        passing.update((source_name, cid) for cid in df.loc[mask, "corpus_id"])
+        mask = days != NO_DATE
+        if lo is not None:
+            mask &= days >= lo
+        if hi is not None:
+            mask &= days <= hi
+        passing.update((source_name, subset[i]["corpus_id"]) for i in np.flatnonzero(mask))
     return [c for c in candidates if (c["source"], c["corpus_id"]) in passing]
 
 

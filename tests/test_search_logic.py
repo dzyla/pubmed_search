@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import search_logic  # noqa: E402
 
-from conftest import EMB_BYTES, N_FILES, ROWS_PER_FILE  # noqa: E402
+from conftest import EMB_BYTES, N_FILES, ROWS_PER_FILE, build_corpus  # noqa: E402
 
 
 def _true_top_scores(all_emb, query, k):
@@ -218,7 +218,7 @@ def test_index_change_invalidates_cache(corpus):
 
 
 def test_rare_date_range_uses_few_rounds(corpus, monkeypatch):
-    """Date screening reads only the date column and grows its probe size."""
+    """Date screening uses the in-RAM dates; only result rows are fetched from parquet."""
     config, _ = corpus
     calls = []
     orig = search_logic.fetch_specific_rows
@@ -229,8 +229,36 @@ def test_rare_date_range_uses_few_rounds(corpus, monkeypatch):
     df = search_logic._run_search(query, [config, {}, {}, {}], 10, "2015-01-01", None, True, None)
 
     assert len(df) == 10 and (pd.to_datetime(df["date"]) >= "2015-01-01").all()
-    date_only = [c for c in calls if c == search_logic._DATE_COLUMNS]
-    assert date_only and len(calls) <= 6
+    assert len(calls) <= 3 and all(c is None for c in calls)
+
+
+def test_dates_for_reads_each_file_once(corpus):
+    config, _ = corpus
+    searcher = search_logic.get_or_create_searcher(config)
+    days = searcher.dates_for([0, 27, 150, 599, 10_000])
+    expected = [(pd.Timestamp(d) - pd.Timestamp("1970-01-01")).days
+                for d in ("2010-01-01", "2010-01-28", "2011-01-23", "2015-01-16")]
+    assert days[:4].tolist() == expected and days[4] == search_logic.NO_DATE
+    assert len(searcher._dates) == 3                 # files 0, 1 and 5
+    searcher.dates_for([1, 2])                        # cached: no new reads
+    assert len(searcher._dates) == 3
+
+
+def test_dates_outside_int16_range_are_exact(tmp_path):
+    config, _ = build_corpus(tmp_path)
+    path = os.path.join(config["data_folder"], "part_00.parquet")
+    df = pd.read_parquet(path)
+    df.loc[3, "date"], df.loc[4, "date"], df.loc[5, "date"] = "1818-01-01", "2150-06-01", "not a date"
+    df.to_parquet(path)
+    searcher = search_logic.get_or_create_searcher(config)
+    days = searcher.dates_for([3, 4, 5, 6])
+    epoch = pd.Timestamp("1970-01-01")
+    assert days[0] == (pd.Timestamp("1818-01-01") - epoch).days
+    assert days[1] == (pd.Timestamp("2150-06-01") - epoch).days
+    assert days[2] == search_logic.NO_DATE
+    kept = search_logic._filter_candidates_by_date(
+        [{"corpus_id": i, "source": "PubMed"} for i in (3, 4, 6)], {"PubMed": searcher}, "1800-01-01", "1850-01-01")
+    assert [c["corpus_id"] for c in kept] == [3]
 
 
 def test_preprint_without_published_doi_merges_by_title():
