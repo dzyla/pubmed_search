@@ -3,7 +3,7 @@
 PubMed XML Pipeline:
 1. Downloads updated/baseline XML files from NCBI FTP.
 2. Extracts and processes them into optimized Parquet files.
-3. Configuration is loaded from 'config_mss.yaml'.
+3. Configuration is loaded from MSS_PIPELINE_CONFIG (see mss_env.py).
 
 Note: Embedding generation has been removed and moved to a separate script.
 """
@@ -65,7 +65,9 @@ server_thread.start()
 #########################################
 # Configuration
 #########################################
-CONFIG_FILE = "~/pubmed_search/snowflake_code/config_mss.yaml"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+CONFIG_FILE = mss_env.pipeline_config()
 
 print(f"Loading configuration from {CONFIG_FILE}...")
 
@@ -445,7 +447,7 @@ def process_and_save(file_path):
     if df is not None and not df.empty:
         save_optimized_parquet(df, parquet_file)
         # The XML (~150-250 MB uncompressed) is not needed once its parquet exists;
-        # left behind, hundreds of them filled the H: drive.
+        # left behind, hundreds of them filled the data drive.
         if os.path.exists(parquet_file):
             os.remove(file_path)
     else:

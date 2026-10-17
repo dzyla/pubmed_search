@@ -60,9 +60,10 @@ from textlang import is_english  # noqa: E402
 EPMC_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_POST_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/searchPOST"
 CROSSREF_API = "https://api.crossref.org/works"
-MAILTO = "contact@example.org"
-USER_AGENT = f"ManuscriptSearch/2.0 (https://manuscript-search.org; mailto:{MAILTO})"
-DEFAULT_BASE = "/data/mss"
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+MAILTO = mss_env.contact_email()
+USER_AGENT = mss_env.user_agent()
+DEFAULT_BASE = mss_env.data_root()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_ROWS = 25_000
 PAGE_SIZE = 1000
@@ -403,7 +404,9 @@ def fetch_crossref(prefix: str, since: str = None, limit: int = None):
     flt = f"type:posted-content,has-abstract:true,prefix:{prefix}"
     if since:
         flt += f",from-index-date:{since}"
-    params = {"filter": flt, "rows": PAGE_SIZE, "cursor": "*", "select": CROSSREF_SELECT, "mailto": MAILTO}
+    params = {"filter": flt, "rows": PAGE_SIZE, "cursor": "*", "select": CROSSREF_SELECT}
+    if MAILTO:
+        params["mailto"] = MAILTO
     seen, page = 0, 0
     while True:
         msg = _get(CROSSREF_API, params).get("message", {})

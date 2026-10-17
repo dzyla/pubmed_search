@@ -7,7 +7,7 @@ Tiers (searches per UTC day):
     partner     keys issued by the owner             PARTNER_DAILY_LIMIT (10,000)
     internal    the web UI (MSS_INTERNAL_KEY)        unlimited
 
-Admin CLI (run on the server, from /srv/mss/app):
+Admin CLI (run where the backend runs, from the app directory):
     python access.py create --tier partner --label "Lab X" [--email a@b]
     python access.py revoke <key-or-prefix>
     python access.py list

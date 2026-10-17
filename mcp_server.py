@@ -46,7 +46,8 @@ def _parse_date(value: Optional[str], name: str) -> Optional[str]:
         raise ToolError(f"{name} must be YYYY-MM-DD, got {value!r}") from exc
 
 
-def build_mcp(search: SearchFn, stats: StatsFn, similar: SearchFn = None, max_top_k: int = 10) -> FastMCP:
+def build_mcp(search: SearchFn, stats: StatsFn, similar: SearchFn = None, max_top_k: int = 10,
+              library: SearchFn = None, citations: SearchFn = None) -> FastMCP:
     mcp = FastMCP(
         "Manuscript Search",
         instructions=INSTRUCTIONS,
@@ -138,6 +139,76 @@ def build_mcp(search: SearchFn, stats: StatsFn, similar: SearchFn = None, max_to
             if not include_abstracts:
                 for paper in result.get("results", []) + result.get("seeds", []):
                     paper.pop("abstract", None)
+            return result
+
+    if library is not None:
+        @mcp.tool()
+        async def find_papers_like(
+            paper_ids: list[str],
+            top_k: int = 10,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
+            include_abstracts: bool = False,
+        ) -> dict[str, Any]:
+            """
+            Papers like a set of known papers (e.g. a user's library or a reference list) that are
+            not in the set. The papers are grouped into themes and each theme is searched; every
+            result's 'theme' indexes the response's 'themes'. 'not_found' lists ids not in the index.
+
+            Args:
+                paper_ids: 1-500 DOIs, PubMed ids or arXiv ids, e.g. ["10.1038/s41586-020-2012-7", "32015507"].
+                top_k: Number of results, 1-10.
+                start_date / end_date: Optional publication date range (YYYY-MM-DD).
+                include_abstracts: Set true to include abstracts.
+            """
+            if not 1 <= len(paper_ids) <= 500:
+                raise ToolError("paper_ids must contain 1-500 identifiers")
+            if not 1 <= top_k <= max_top_k:
+                raise ToolError(f"top_k must be between 1 and {max_top_k}")
+            start, end = _parse_date(start_date, "start_date"), _parse_date(end_date, "end_date")
+            try:
+                result = await library(ids=[str(i) for i in paper_ids], top_k=top_k, start_date=start,
+                                       end_date=end)
+            except SearchFailed as exc:
+                raise ToolError(str(exc)) from exc
+            for paper in result.get("results", []) + result.get("seeds", []):
+                if not include_abstracts:
+                    paper.pop("abstract", None)
+            return result
+
+    if citations is not None:
+        @mcp.tool()
+        async def get_citations(
+            paper: str,
+            direction: str = "cited_by",
+            top_k: int = 10,
+            include_abstracts: bool = False,
+        ) -> dict[str, Any]:
+            """
+            Papers that cite a paper ('cited_by', most cited first) or that it cites
+            ('references', newest first), from OpenAlex. Papers in this index carry a 'ref' for
+            find_similar; others have in_index=false. total_results is the full count.
+
+            Args:
+                paper: A result 'ref' (e.g. "PubMed:123456"), a DOI, or a PubMed id.
+                direction: "cited_by" or "references".
+                top_k: Number of papers, 1-10.
+                include_abstracts: Set true to include abstracts of indexed papers.
+            """
+            if direction not in ("cited_by", "references"):
+                raise ToolError("direction must be 'cited_by' or 'references'")
+            if not 1 <= top_k <= max_top_k:
+                raise ToolError(f"top_k must be between 1 and {max_top_k}")
+            paper = paper.strip()
+            kind = ("ref" if ":" in paper and paper.split(":", 1)[0] in SOURCES
+                    else "pmid" if paper.isdigit() else "doi")
+            try:
+                result = await citations(**{kind: paper}, direction=direction, top_k=top_k)
+            except SearchFailed as exc:
+                raise ToolError(str(exc)) from exc
+            for p in result.get("results", []) + result.get("seeds", []):
+                if not include_abstracts:
+                    p.pop("abstract", None)
             return result
 
     @mcp.tool()

@@ -1,0 +1,72 @@
+# Copy to config_mss.yaml (git-ignored) and point the paths at your data.
+# Relative paths are resolved from the working directory of search_api.py;
+# MSS_CONFIG_PATH selects a different file.
+# Identifier index + PubMed superseded rows (built by update_database/build_aux_indexes.py)
+aux_index_root: "./data/aux_index"
+
+pubmed_config:
+  embeddings_directory: "./data/pubmed26_update_embed/"
+  xml_directory: "./data/pubmed26_update_xmls/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_pubmed_embeddings/"
+  metadata_path: "./data/pubmed_chunked_metadata.json"
+  data_folder: "./data/pubmed26_parquet_files/"
+  chunk_size_bytes: 1073741824  # 512MB in bytes
+
+biorxiv_config:
+  embeddings_directory: "./data/biorxiv_embed_binary/"
+  npy_files_pattern: "*.npy"
+  combined_data_file: "./data/biorxiv_embed_binary/biorxiv_metadata.parquet"
+  chunk_dir: "./data/chunked/chunked_biorxiv_embeddings/"
+  metadata_path: "./data/biorxiv_chunked_memmap_metadata.json"
+  data_folder:        "./data/biorxiv_embed_binary/"
+  chunk_size_bytes: 1073741824
+
+medrxiv_config:
+  embeddings_directory: "./data/medarxiv_embed_binary/"
+  npy_files_pattern: "*.npy"
+  combined_data_file: "./data/medarxiv_embed_binary/medarxiv_metadata.parquet"
+  chunk_dir: "./data/chunked/chunked_medarxiv_embeddings/"
+  metadata_path: "./data/medarxiv_chunked_memmap_metadata.json"
+  data_folder: "./data/medarxiv_embed_binary/"
+  chunk_size_bytes: 1073741824
+
+arxiv_config:
+  embeddings_directory: "./data/arxiv_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_arxiv_embeddings/"
+  metadata_path: "./data/arxiv_chunked_memmap_metadata.json"
+  data_folder: "./data/arxiv_df/"
+  chunk_size_bytes: 1073741824
+
+clinicaltrials_config:
+  embeddings_directory: "./data/clinicaltrials_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_clinicaltrials_embeddings/"
+  metadata_path: "./data/clinicaltrials_chunked_memmap_metadata.json"
+  data_folder: "./data/clinicaltrials_df/"
+  chunk_size_bytes: 1073741824
+
+preprints_config:
+  embeddings_directory: "./data/preprints_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_preprints_embeddings/"
+  metadata_path: "./data/preprints_chunked_memmap_metadata.json"
+  data_folder: "./data/preprints_df/"
+  chunk_size_bytes: 1073741824
+
+grants_config:
+  embeddings_directory: "./data/grants_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_grants_embeddings/"
+  metadata_path: "./data/grants_chunked_memmap_metadata.json"
+  data_folder: "./data/grants_df/"
+  chunk_size_bytes: 1073741824
+
+openalex_config:
+  embeddings_directory: "./data/openalex_embed/"
+  npy_files_pattern: "*.npy"
+  chunk_dir: "./data/chunked/chunked_openalex_embeddings/"
+  metadata_path: "./data/openalex_chunked_memmap_metadata.json"
+  data_folder: "./data/openalex_df/"
+  chunk_size_bytes: 1073741824

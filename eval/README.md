@@ -1,7 +1,7 @@
 # Offline evaluation
 
-Read-only scripts that measure search quality on real data. Run them on the lab
-desktop (GPU, data on H:), never on the server.
+Read-only scripts that measure search quality on real data. Run them on a GPU
+machine with a copy of the data, not on the search server.
 
 ## `check_doc_prefix.py` — how were stored vectors made?
 
@@ -36,8 +36,8 @@ is applied in the app.
 
 ```bash
 python eval/ranking_eval.py \
-  --data-dir /data/pubmed_semantic_search \
-  --queries ~/pubmed_search/snowflake_code/pubmed_synthetic_queries_10k.parquet
+  --data-dir <data dir> \
+  --queries <synthetic queries>.parquet
 ```
 ~5 min on an RTX 5080 (most of it re-embedding the no-prefix distractors).
 
@@ -60,11 +60,11 @@ files outside the subset).
 | two questions without identifiers | — | unchanged | unchanged |
 
 Index (all sources): 9.4M identifiers, 113M postings, ~0.8 GB on disk,
-memory-mapped on the server; built nightly on the desktop in ~15 min.
+memory-mapped by the backend; built nightly in ~15 min on the GPU machine.
 
 ## int8 rescoring — 2026-10-15
 
-Benchmark (`~/emb_bench`, 400k-document sample of all sources, 100 topical queries
+Benchmark (separate benchmark scripts, 400k-document sample of all sources, 100 topical queries
 with pooled graded judgments): binary search + float-query-vs-bits rescoring
 nDCG@10 0.661 → binary search + int8 rescoring **0.725** (69 queries better, 31 worse).
 int8 equals exact float rescoring (0.7172 vs 0.7181). Keeping the BGE query prefix
@@ -75,7 +75,7 @@ binary code (median sign agreement 1.000).
 Calibration (`int8_calibration.npy`): per-dimension 0.01–99.99 percentile range of
 the 400k sample (min/max and 0.1–99.9 were equivalent; 1–99 lost 0.007 nDCG).
 
-Depth (`~/reembed/depth_test2.py`, 250 queries, all ~56M vectors, production code):
+Depth (separate test script, 250 queries, all ~56M vectors, production code):
 agreement with re-scoring all ~42k candidates of a search, before dedup —
 
 | Re-scored | top-1 | top-10 | top-50 |
@@ -87,6 +87,6 @@ agreement with re-scoring all ~42k candidates of a search, before dedup —
 | **2,000 (default)** | 1.00 | 1.000 | 0.997 |
 
 The bits → int8 score slope is 0.99 (IQR 0.92–1.07), so `EXACT_BOOST` keeps its value.
-On the server, re-scoring 1,000 candidates takes 0.06–0.09 s (cold reads included);
+On the production CPU server, re-scoring 1,000 candidates takes 0.06–0.09 s (cold reads included);
 the default is 2,000 (`MSS_INT8_DEPTH`).
 Re-embedding everything: 56.4M documents in 4.9 h on the RTX 5080 (`fast_embed.py`).

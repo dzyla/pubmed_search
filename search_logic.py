@@ -94,6 +94,17 @@ _UPDATE_CHECK_INTERVAL_S: float = float(os.environ.get("MSS_UPDATE_INTERVAL_S", 
 _LAST_UPDATE_CHECK_TS: float = 0.0
 
 
+def _index_codes(index) -> np.ndarray:
+    """The stored codes of a FAISS binary index as a zero-copy (ntotal, code_size) numpy view.
+    Fancy-indexing it is ~20x faster than calling index.reconstruct() per row."""
+    view = getattr(index, "_mss_codes", None)
+    if view is None or len(view) != index.ntotal:
+        view = faiss.rev_swig_ptr(index.xb.data(), index.ntotal * index.code_size) \
+            .reshape(index.ntotal, index.code_size)
+        index._mss_codes = view      # keeps the view with its index (both live in _INDEX_CACHE)
+    return view
+
+
 def _get_or_build_faiss_index(chunk_path: str, actual_rows: int, embedding_dim: int):
     """
     Returns a cached faiss.IndexBinaryFlat for the given chunk file.
@@ -434,6 +445,18 @@ class ChunkedSearcher:
             LOGGER.info(f"{self.source_name}: hiding {count:,} superseded record versions")
         return True
 
+    def rows_for_paper_ids(self, key_hashes) -> np.ndarray:
+        """Global row ids for paper-id key hashes (identifiers.id_key), -1 where not indexed here."""
+        out = np.full(len(key_hashes), -1, dtype=np.int64)
+        if self.aux is None or not self.aux.loaded or self._aux_stem_starts is None:
+            return out
+        found, sid, row = self.aux.paper_rows(key_hashes)
+        start = np.where(found, self._aux_stem_starts[np.where(found, sid, 0)], -1)
+        g = start + row
+        ok = found & (start >= 0) & (g < int(self.metadata.get("total_rows", 0)))
+        out[ok] = g[ok]
+        return out
+
     def is_superseded(self, gids: np.ndarray) -> np.ndarray:
         gids = np.asarray(gids, dtype=np.int64)
         if self._superseded_bits is None or not len(gids):
@@ -452,7 +475,7 @@ class ChunkedSearcher:
             if not m.any():
                 continue
             index = _get_or_build_faiss_index(os.path.join(self.chunk_dir, chunk["chunk_file"]), n, dim)
-            out[m] = np.stack([index.reconstruct(int(g - gs)) for g in gids[m]])
+            out[m] = _index_codes(index)[gids[m] - gs]
             found[m] = True
         return out, found
 
@@ -1209,7 +1232,7 @@ class ChunkedSearcher:
                 local_ids, scores = local_ids[keep], scores[keep]
 
             if query_float is not None and len(local_ids):
-                codes = np.stack([index.reconstruct(int(i)) for i in local_ids])
+                codes = _index_codes(index)[local_ids]
                 scores = rescore_with_float_query(query_float, codes)
 
             return [
@@ -1261,6 +1284,63 @@ class ChunkedSearcher:
             candidates, self.metadata, self.data_folder,
             self.combined_data_file, intervals=self.intervals, columns=columns,
         )
+
+
+def _normalize_rows(df_subset: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    """Source-specific columns of fetched rows -> the common result columns (journal, date, pub_type, …)."""
+    df_subset["source"] = source_name
+
+    col_map = {c.lower(): c for c in df_subset.columns}
+
+    if "server" in col_map:
+        df_subset.rename(columns={col_map["server"]: "journal"}, inplace=True)
+    elif "journal-ref" in col_map:
+        df_subset["journal"] = df_subset[col_map["journal-ref"]]
+    elif "journal" not in col_map and "source_title" in col_map:
+        df_subset["journal"] = df_subset[col_map["source_title"]]
+
+    if "date" not in df_subset.columns:
+        if "update_date" in df_subset.columns:
+            df_subset["date"] = df_subset["update_date"]
+        elif "posted" in df_subset.columns:
+            df_subset["date"] = df_subset["posted"]
+
+    # PubMed publication types (Review, Retracted Publication, …).
+    # bioRxiv/medRxiv also have a "type" column, but it means something else.
+    if source_name == "PubMed" and "type" in df_subset.columns:
+        df_subset["pub_type"] = df_subset["type"]
+
+    # Preprints: DOI of the journal version, "NA" when unpublished.
+    if "published" in df_subset.columns:
+        published = df_subset["published"].astype(str).str.strip()
+        df_subset["published_doi"] = published.where(published.str.startswith("10."), None)
+    return df_subset
+
+
+def fetch_papers(pairs, all_configs) -> dict:
+    """Result rows for indexed documents [(source, corpus_id), …] -> {(source, corpus_id): row dict},
+    normalized like search results (common columns, PMC ids)."""
+    by_name = dict(zip(_SOURCE_NAMES, all_configs))
+    by_source: dict = {}
+    for source, cid in pairs:
+        by_source.setdefault(source, set()).add(int(cid))
+    frames = []
+    for source, cids in by_source.items():
+        if not by_name.get(source):
+            continue
+        df = get_or_create_searcher(by_name[source]).fetch_rows([{"corpus_id": c, "score": 0.0} for c in cids])
+        if not df.empty:
+            df = _normalize_rows(df, source)
+            frames.append(df[[c for c in RESULT_COLUMNS if c in df.columns]])
+    if not frames:
+        return {}
+    df = pd.concat(frames, ignore_index=True)
+    pmc = _pmc_index(all_configs)
+    if pmc is not None and "pmid" in df.columns:
+        found = pd.Series(pmc.lookup(df["pmid"].tolist()), index=df.index, dtype=object)
+        df["pmcid"] = (df["pmcid"].where(df["pmcid"].astype(str).str.startswith("PMC"), found)
+                       if "pmcid" in df.columns else found)
+    return {(r["source"], int(r["corpus_id"])): r for r in df.to_dict("records")}
 
 
 # ---------------------------------------------------------------------------
@@ -1406,10 +1486,11 @@ def rescore_with_float_query(query_float, codes) -> np.ndarray:
 
 def combined_search_orchestrator(
     query_packed, configs, top_k, start_date=None, end_date=None, use_high_quality=False,
-    query_float=None, query_text=None,
+    query_float=None, query_text=None, exclude=None,
 ):
     """
     Orchestrates search across all sources with live deduplication.
+    `exclude`: (source, corpus_id) pairs left out before any row is fetched.
 
     Optimisations vs. original:
     - Uses module-level ChunkedSearcher cache (no repeated metadata JSON reads / globs).
@@ -1423,6 +1504,7 @@ def combined_search_orchestrator(
         tuple(cfg.get("chunk_dir") for cfg in configs if cfg),
         top_k, start_date, end_date, bool(use_high_quality),
         tuple(sorted(identifier_tokens(query_text))) if query_text else (),
+        tuple(sorted(exclude)) if exclude else (),
     )
     with _RESULT_CACHE_LOCK:
         cache_key += (_INDEX_GENERATION,)
@@ -1430,10 +1512,12 @@ def combined_search_orchestrator(
         if cached is not None:
             _RESULT_CACHE.move_to_end(cache_key)
             LOGGER.info("Search served from result cache.")
-            return cached.copy()
+            out = cached.copy()
+            out.attrs["timings"] = {"cache": 1}
+            return out
 
     result_df = _run_search(query_packed, configs, top_k, start_date, end_date,
-                            use_high_quality, query_float, query_text)
+                            use_high_quality, query_float, query_text, exclude)
 
     with _RESULT_CACHE_LOCK:
         if cache_key[-1] == _INDEX_GENERATION and not result_df.empty:
@@ -1576,8 +1660,10 @@ def _candidate_batches(candidates, batch_size, date_filter, searchers, screened=
 
 
 def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_quality, query_float,
-                query_text=None):
+                query_text=None, exclude=None):
     """The uncached search behind combined_search_orchestrator."""
+    tm = {"cache": 0}                     # stage timings (s), logged by search_api.run_search
+    t_stage = time.perf_counter()
     tokens = sorted(identifier_tokens(query_text))[:MAX_QUERY_IDENTIFIERS] if query_text else []
     token_hashes = {t: token_hash(t) for t in tokens}
     # A query that is nothing but identifiers ("TMEM175", "rs429358 APOE") asks for
@@ -1633,6 +1719,8 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
     if not valid_sources:
         return pd.DataFrame()
 
+    tm["prep"] = time.perf_counter() - t_stage
+    t_stage = time.perf_counter()
     with log_time("Scanning All Sources (parallel)"):
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(valid_sources)) as executor:
             futures = {
@@ -1648,8 +1736,16 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                 except Exception as e:
                     LOGGER.error(f"Error searching source: {e}")
 
+    tm["scan"] = time.perf_counter() - t_stage
+    tm["raw"] = len(all_global_candidates)
+    if exclude:
+        all_global_candidates = [c for c in all_global_candidates
+                                 if (c["source"], int(c["corpus_id"])) not in exclude]
     # --- 2. Sort globally by score; re-rank the best candidates with int8 vectors ---
+    t_stage = time.perf_counter()
     all_global_candidates.sort(key=lambda x: x["score"], reverse=True)
+    tm["sort"] = time.perf_counter() - t_stage
+    t_stage = time.perf_counter()
     screened = 0
     if date_filter:
         # Re-rank the best candidates that pass the date filter, not the best overall.
@@ -1657,11 +1753,16 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                                        searchers, start_date, end_date)
         all_global_candidates = passing + all_global_candidates[pos:]
         screened = len(passing)
+    tm["date_screen"] = time.perf_counter() - t_stage
+    t_stage = time.perf_counter()
     if query_float is not None and INT8_RESCORE_DEPTH > 0:
         with log_time("int8 rescoring"):
             all_global_candidates = _rescore_head_int8(
                 all_global_candidates, max(INT8_RESCORE_DEPTH, 4 * top_k), searchers, query_float)
 
+    tm["int8"] = time.perf_counter() - t_stage
+    t_stage = time.perf_counter()
+    tm["fetch"], tm["batches"] = 0.0, 0
     final_valid_rows = []
     seen_identifiers: dict = {}   # identifier (DOI / title) -> index in final_valid_rows
 
@@ -1672,6 +1773,7 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                                                screened):
         if len(final_valid_rows) >= top_k:
             break
+        tm["batches"] += 1
 
         candidates_by_source: dict = {}
         for c in batch_candidates:
@@ -1683,36 +1785,13 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
             if not searcher:
                 continue
             try:
+                t_fetch = time.perf_counter()
                 df_subset = searcher.fetch_rows(subset)
+                tm["fetch"] += time.perf_counter() - t_fetch
                 if df_subset.empty:
                     continue
 
-                df_subset["source"] = source_name
-
-                col_map = {c.lower(): c for c in df_subset.columns}
-
-                if "server" in col_map:
-                    df_subset.rename(columns={col_map["server"]: "journal"}, inplace=True)
-                elif "journal-ref" in col_map:
-                    df_subset["journal"] = df_subset[col_map["journal-ref"]]
-                elif "journal" not in col_map and "source_title" in col_map:
-                    df_subset["journal"] = df_subset[col_map["source_title"]]
-
-                if "date" not in df_subset.columns:
-                    if "update_date" in df_subset.columns:
-                        df_subset["date"] = df_subset["update_date"]
-                    elif "posted" in df_subset.columns:
-                        df_subset["date"] = df_subset["posted"]
-
-                # PubMed publication types (Review, Retracted Publication, …).
-                # bioRxiv/medRxiv also have a "type" column, but it means something else.
-                if source_name == "PubMed" and "type" in df_subset.columns:
-                    df_subset["pub_type"] = df_subset["type"]
-
-                # Preprints: DOI of the journal version, "NA" when unpublished.
-                if "published" in df_subset.columns:
-                    published = df_subset["published"].astype(str).str.strip()
-                    df_subset["published_doi"] = published.where(published.str.startswith("10."), None)
+                df_subset = _normalize_rows(df_subset, source_name)
 
                 required_cols = RESULT_COLUMNS
                 for col in required_cols:
@@ -1753,8 +1832,13 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
                 break
             _add_or_merge(final_valid_rows, seen_identifiers, row)
 
+    # batch loop minus parquet reads: date-column screening of later batches, filters, dedup
+    tm["merge"] = time.perf_counter() - t_stage - tm["fetch"]
+    t_stage = time.perf_counter()
     if not final_valid_rows:
-        return pd.DataFrame()
+        out = pd.DataFrame()
+        out.attrs["timings"] = tm
+        return out
 
     result_df = pd.DataFrame(final_valid_rows)
 
@@ -1783,7 +1867,62 @@ def _run_search(query_packed, configs, top_k, start_date, end_date, use_high_qua
         )
         result_df.loc[preprint_mask, "source"] = "BioRxiv"
 
-    return result_df.reset_index(drop=True)
+    result_df = result_df.reset_index(drop=True)
+    tm["post"] = time.perf_counter() - t_stage
+    result_df.attrs["timings"] = tm
+    return result_df
+
+
+# ---------------------------------------------------------------------------
+# Alerts (alerts.py): the relevance bar of a saved search
+# ---------------------------------------------------------------------------
+
+# The binary ranking misses many of the true int8 top N, so the bar is the rank-th int8
+# score in a pool of ALERT_POOL_FACTOR × rank binary candidates, all re-scored with int8.
+# Measured over the full 56M corpus for 7 real alerts (2026-10-16), true rank of the bar:
+# pool = rank (the old code): 100k–1.4M for rank 2,000; pool 4 × rank from 40k binary
+# candidates per source: 2,100–2,900 for rank 2,000 and 510–730 for rank 500.
+ALERT_POOL_FACTOR = 4
+ALERT_CANDIDATES_PER_SOURCE = 40000
+
+
+def alert_calibration(query_packed, query_float, configs, rank: int, recent_days: int = 30) -> dict:
+    """
+    For a saved search over `configs`: the int8 score of (about) the rank-th best
+    document (before dedup; the bar new papers must clear), the candidates clearing it
+    that were published in the last `recent_days` (to seed the feed), and how many
+    cleared it in the last 365 days (to estimate the alert's volume).
+    """
+    pool = ALERT_POOL_FACTOR * rank
+    searchers, cands = {}, []
+    for name, cfg in zip(_SOURCE_NAMES, configs):
+        if not cfg:
+            continue
+        searcher = get_or_create_searcher(cfg)
+        if searcher.data_problem:
+            continue
+        searchers[name] = searcher
+        for c in searcher.find_candidates_raw(query_packed, limit=max(ALERT_CANDIDATES_PER_SOURCE, pool),
+                                              query_float=query_float):
+            c["source"] = name
+            cands.append(c)
+    if not cands:
+        return {"threshold": None, "recent": [], "last_year": 0}
+    cands.sort(key=lambda x: x["score"], reverse=True)
+    cands = _rescore_head_int8(cands[:pool], pool, searchers, query_float)
+    above = cands[:min(rank, len(cands))]
+    threshold = above[-1]["score"]
+    today = (pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timestamp("1970-01-01")).days
+    recent, last_year = [], 0
+    by_source: dict = {}
+    for c in above:
+        by_source.setdefault(c["source"], []).append(c)
+    for name, subset in by_source.items():
+        days = searchers[name].dates_for([c["corpus_id"] for c in subset])
+        last_year += int(((days >= today - 365) & (days <= today)).sum())
+        recent += [c for c, d in zip(subset, days) if today - recent_days <= d <= today + 365]
+    recent.sort(key=lambda x: x["score"], reverse=True)
+    return {"threshold": float(threshold), "recent": recent, "last_year": last_year, "searchers": searchers}
 
 
 # ---------------------------------------------------------------------------
@@ -1801,49 +1940,43 @@ def parse_ref(ref: str):
     return source, int(cid)
 
 
-def similar_search(refs, all_configs, search_configs, top_k, start_date=None, end_date=None,
-                   use_high_quality=False):
+def _seed_vectors(pairs, all_configs):
     """
-    Finds documents similar to one or more example documents (refs like
-    'PubMed:123'). The examples' stored vectors (int8, else their ±1 codes) are
-    averaged into a float query, so several examples act as one "more like these" query. Returns
-    (results DataFrame without the examples, list of example row dicts,
-    packed query code).
+    Unit vectors and metadata rows for example documents [(source, corpus_id), …]:
+    their stored int8 vectors, else their ±1 codes. Reads are batched per source.
+    Raises UnknownReference for a document that is not indexed.
     """
     by_name = dict(zip(_SOURCE_NAMES, all_configs))
-    signs, seeds = [], []
-    for ref in refs:
-        source, cid = parse_ref(ref)
+    by_source: dict = {}
+    for i, (source, cid) in enumerate(pairs):
+        by_source.setdefault(source, []).append((i, int(cid)))
+    vecs = np.zeros((len(pairs), 384), dtype=np.float32)
+    seeds = [None] * len(pairs)
+    lo, step = int8_codes.load_calibration()
+    for source, items in by_source.items():
         cfg = by_name.get(source)
         if not cfg:
             raise UnknownReference(f"{source} is not indexed on this server")
         searcher = get_or_create_searcher(cfg)
-        codes, found = searcher.codes_for([cid])
-        if not found[0]:
-            raise UnknownReference(f"{ref} does not exist")
-        codes8, ok8 = searcher.checked_int8_rows([cid])
-        if ok8[0]:
-            lo, step = int8_codes.load_calibration()
-            v = (codes8[0].astype(np.float32) + 128) * step + lo
-        else:
-            v = np.unpackbits(codes[0]).astype(np.float32) * 2 - 1
-        signs.append(v / max(np.linalg.norm(v), 1e-12))
-        row = searcher.fetch_rows([{"corpus_id": cid, "score": 1.0}])
-        seed = row.iloc[0].to_dict() if not row.empty else {"corpus_id": cid}
-        seed["source"] = source
-        seeds.append(seed)
+        pos = [i for i, _ in items]
+        cids = np.array([c for _, c in items], dtype=np.int64)
+        codes, found = searcher.codes_for(cids)
+        if not found.all():
+            raise UnknownReference(f"{source}:{int(cids[~found][0])} does not exist")
+        codes8, ok8 = searcher.checked_int8_rows(cids)
+        v = np.where(ok8[:, None], (codes8.astype(np.float32) + 128) * step + lo,
+                     np.unpackbits(codes, axis=1).astype(np.float32) * 2 - 1)
+        vecs[pos] = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12)
+        rows = searcher.fetch_rows([{"corpus_id": int(c), "score": 1.0} for c in cids])
+        by_cid = {int(r["corpus_id"]): r for r in rows.to_dict("records")} if not rows.empty else {}
+        for i, c in items:
+            seeds[i] = {**by_cid.get(c, {"corpus_id": c}), "source": source}
+    return vecs, seeds
 
-    q = np.mean(signs, axis=0)
-    norm = np.linalg.norm(q)
-    if norm == 0:
-        raise UnknownReference("the examples cancel each other out; choose fewer or closer examples")
-    q_float = (q / norm).astype(np.float32)
-    packed = np.packbits(q_float > 0)[np.newaxis, :]
 
-    df = combined_search_orchestrator(packed, search_configs, top_k + 3 * len(seeds),
-                                      start_date, end_date, use_high_quality, q_float)
-    if df.empty:
-        return df, seeds, packed
+def _seed_filter(seeds):
+    """A predicate telling whether a result row is one of the example documents
+    (same row, or the same paper by DOI, PMID or title)."""
     seed_ids = {(sd["source"], int(sd["corpus_id"])) for sd in seeds}
     seed_keys = {k for sd in seeds for k in (_norm_doi(sd.get("doi")), _norm_doi(sd.get("published_doi")),
                                              f"pmid:{sd.get('pmid')}" if str(sd.get("pmid") or "").isdigit() else "",
@@ -1855,9 +1988,173 @@ def similar_search(refs, all_configs, search_configs, top_k, start_date=None, en
         keys = {_norm_doi(r.get("doi")), _norm_doi(r.get("published_doi")), _norm_doi(r.get("preprint_doi")),
                 f"pmid:{r.get('pmid')}" if str(r.get("pmid") or "").isdigit() else "", _title_key(r.get("title"))}
         return bool((keys - {""}) & seed_keys)
+    return is_seed
 
+
+def _seed_pairs(seeds) -> frozenset:
+    return frozenset((sd["source"], int(sd["corpus_id"])) for sd in seeds)
+
+
+def _centroid_query(vecs):
+    q = np.mean(vecs, axis=0)
+    norm = np.linalg.norm(q)
+    if norm == 0:
+        raise UnknownReference("the examples cancel each other out; choose fewer or closer examples")
+    q_float = (q / norm).astype(np.float32)
+    return q_float, np.packbits(q_float > 0)[np.newaxis, :]
+
+
+def _search_excluding(q_float, packed, search_configs, top_k, n_seeds, start_date, end_date,
+                      use_high_quality, is_seed, exclude=None):
+    # The examples themselves are dropped before rows are fetched; other copies of them
+    # (a preprint and its journal version) are caught by is_seed on the fetched rows.
+    df = combined_search_orchestrator(packed, search_configs, top_k + min(n_seeds, 20),
+                                      start_date, end_date, use_high_quality, q_float, exclude=exclude)
+    if df.empty:
+        return df
     keep = [not is_seed(r) for r in df.to_dict("records")]
-    return df[keep].head(top_k).reset_index(drop=True), seeds, packed
+    return df[keep].head(top_k).reset_index(drop=True)
+
+
+def similar_search(refs, all_configs, search_configs, top_k, start_date=None, end_date=None,
+                   use_high_quality=False):
+    """
+    Finds documents similar to one or more example documents (refs like
+    'PubMed:123'). The examples' stored vectors (int8, else their ±1 codes) are
+    averaged into a float query, so several examples act as one "more like these" query. Returns
+    (results DataFrame without the examples, list of example row dicts,
+    packed query code).
+    """
+    vecs, seeds = _seed_vectors([parse_ref(r) for r in refs], all_configs)
+    q_float, packed = _centroid_query(vecs)
+    df = _search_excluding(q_float, packed, search_configs, top_k, len(seeds), start_date, end_date,
+                           use_high_quality, _seed_filter(seeds), _seed_pairs(seeds))
+    return df, seeds, packed
+
+
+# ---------------------------------------------------------------------------
+# A reader's library (DOIs / PMIDs / arXiv ids) -> indexed papers -> themes
+# ---------------------------------------------------------------------------
+LIBRARY_MAX_IDS = 500
+LIBRARY_MAX_THEMES = 4
+_THEME_MAX_CENTRE_COSINE = 0.92  # theme centres closer than this are one theme (see library_themes)
+
+
+def resolve_paper_ids(keys, all_configs):
+    """
+    Paper-id keys (identifiers.id_key: 'doi:…', 'pmid:…', 'arxiv:…') -> indexed rows.
+    Returns ({key: (source, corpus_id)}, [keys not found]). The first source in
+    _SOURCE_NAMES order that holds a key wins (PubMed before preprint servers).
+    """
+    keys = list(dict.fromkeys(k for k in keys if k))
+    hashes = np.array([token_hash(k) for k in keys], dtype=np.uint64)
+    found: dict = {}
+    for name, cfg in zip(_SOURCE_NAMES, all_configs):
+        todo = [i for i, k in enumerate(keys) if k not in found]
+        if not cfg or not todo:
+            continue
+        gids = get_or_create_searcher(cfg).rows_for_paper_ids(hashes[todo])
+        for i, g in zip(todo, gids):
+            if g >= 0:
+                found[keys[i]] = (name, int(g))
+    return found, [k for k in keys if k not in found]
+
+
+def _kmeans_cosine(x, k, iters=25, restarts=8):
+    """Spherical k-means on unit vectors: the best of several deterministic restarts
+    (highest total cosine to the centres)."""
+    best, best_fit = None, -np.inf
+    for seed in range(restarts):
+        labels = _kmeans_once(x, k, iters, seed)
+        fit = sum(float(np.linalg.norm(x[labels == j].sum(axis=0))) for j in range(k))
+        if fit > best_fit:
+            best, best_fit = labels, fit
+    return best
+
+
+def _kmeans_once(x, k, iters, seed):
+    rng = np.random.default_rng(seed)
+    centers = [x[rng.integers(len(x))]]
+    for _ in range(1, k):
+        d = 1 - np.max(x @ np.array(centers).T, axis=1)
+        p = np.clip(d, 0, None) ** 2
+        centers.append(x[rng.choice(len(x), p=p / p.sum())] if p.sum() > 0 else x[rng.integers(len(x))])
+    c = np.array(centers)
+    labels = np.zeros(len(x), dtype=int)
+    for _ in range(iters):
+        labels = np.argmax(x @ c.T, axis=1)
+        new = np.array([x[labels == j].mean(axis=0) if (labels == j).any() else c[j] for j in range(k)])
+        new /= np.maximum(np.linalg.norm(new, axis=1, keepdims=True), 1e-12)
+        if np.allclose(new, c):
+            break
+        c = new
+    return labels
+
+
+def library_themes(vecs, max_themes=LIBRARY_MAX_THEMES):
+    """
+    Theme index per paper (0 = largest theme). The largest k <= max_themes whose
+    theme centres are all distinct (pairwise cosine < _THEME_MAX_CENTRE_COSINE)
+    and whose themes have >= 2 papers each; 1 theme for small or uniform libraries.
+    Calibrated on BGE vectors of real PubMed papers: CRISPR / cryo-EM / malaria
+    separate (centres 0.76-0.88), while one field (Alzheimer's, antibodies vs
+    spike mutations) stays together (0.93-0.95). Splitting one field into
+    sub-themes is harmless; averaging two fields into one query is not.
+    """
+    n = len(vecs)
+    best = np.zeros(n, dtype=int)
+    for k in range(2, min(max_themes, n // 3) + 1):
+        labels = _kmeans_cosine(vecs, k)
+        if min(np.bincount(labels, minlength=k)) < 2:
+            continue
+        c = np.array([vecs[labels == j].mean(axis=0) for j in range(k)])
+        c /= np.maximum(np.linalg.norm(c, axis=1, keepdims=True), 1e-12)
+        sim = c @ c.T
+        np.fill_diagonal(sim, -1)
+        if sim.max() < _THEME_MAX_CENTRE_COSINE:
+            best = labels
+    order = np.argsort(-np.bincount(best))
+    remap = np.empty_like(order)
+    remap[order] = np.arange(len(order))
+    return remap[best]
+
+
+def library_search(pairs, all_configs, search_configs, top_k, start_date=None, end_date=None,
+                   use_high_quality=False):
+    """
+    Papers like a reader's library: the library's papers [(source, corpus_id), …]
+    are grouped into themes (library_themes), each theme's centroid is searched,
+    and the library's own papers are left out. top_k is shared among the themes
+    in proportion to their size (at least 3 each). Returns (DataFrame with a
+    'theme' column, seeds, themes [{label, size, seed_refs}], packed code of the
+    whole library's centroid).
+    """
+    vecs, seeds = _seed_vectors(pairs, all_configs)
+    labels = library_themes(vecs)
+    is_seed, exclude = _seed_filter(seeds), _seed_pairs(seeds)
+    k = int(labels.max()) + 1
+    sizes = np.bincount(labels, minlength=k)
+    quota = np.maximum(3, np.round(top_k * sizes / sizes.sum()).astype(int)) if k > 1 else np.array([top_k])
+    themes, frames, seen = [], [], set()
+    for j in range(k):
+        members = np.flatnonzero(labels == j)
+        q_float, packed = _centroid_query(vecs[members])
+        # The theme is named after its most central paper
+        central = members[int(np.argmax(vecs[members] @ q_float))]
+        themes.append({"label": str(seeds[central].get("title") or "Untitled"), "size": int(len(members)),
+                       "seed_refs": [f"{seeds[i]['source']}:{int(seeds[i]['corpus_id'])}" for i in members]})
+        df = _search_excluding(q_float, packed, search_configs, int(quota[j]) + 5, len(seeds),
+                               start_date, end_date, use_high_quality, is_seed, exclude)
+        if df.empty:
+            continue
+        # A paper close to two themes is shown once, under the first (largest) theme
+        fresh = [(r["source"], int(r["corpus_id"])) not in seen for r in df.to_dict("records")]
+        df = df[fresh].head(int(quota[j])).assign(theme=j)
+        seen.update((r["source"], int(r["corpus_id"])) for r in df.to_dict("records"))
+        frames.append(df)
+    _, packed_all = _centroid_query(vecs)
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return out, seeds, themes, packed_all
 
 
 def trigger_database_updates(configs, *, force: bool = False) -> bool:

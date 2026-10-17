@@ -11,6 +11,8 @@ import uuid
 import streamlit as st
 from crossref.restful import Etiquette, Works
 
+import mss_env
+
 LOGGER = logging.getLogger(__name__)
 
 _SESSIONS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions_history.db")
@@ -57,7 +59,10 @@ def get_current_active_users(db_path: str = _SESSIONS_DB, timeout: int = 300) ->
         return 1
 
 
-my_etiquette = Etiquette('Manuscript Search', '1.0', 'https://www.zylalab.org', 'contact@example.org')
+# Crossref polite pool: the contact address comes from MSS_CONTACT_EMAIL (none is sent when unset)
+_etiquette_args = ('Manuscript Search', '1.0', 'https://www.zylalab.org')
+my_etiquette = (Etiquette(*_etiquette_args, mss_env.contact_email()) if mss_env.contact_email()
+                else Etiquette(*_etiquette_args))
 works = Works(etiquette=my_etiquette)
 
 

@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 
-WORK = "/data/umap_work"
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import WORK  # noqa: E402
 STOP = {"Humans", "Male", "Female", "Animals", "Adult", "Middle Aged", "Aged", "Aged, 80 and over",
         "Young Adult", "Adolescent", "Child", "Retrospective Studies", "Prospective Studies",
         "Treatment Outcome", "Time Factors", "Risk Factors", "Follow-Up Studies", "Cross-Sectional Studies",

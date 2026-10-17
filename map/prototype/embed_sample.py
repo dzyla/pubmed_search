@@ -1,6 +1,7 @@
 """Step 2: re-embed the sample's "title. abstract" to float with BGE-small (GPU, fp16),
 exactly as the stored codes were made (PubMed with the BGE query prefix, others without),
 and check bit agreement with the stored codes (validates row alignment)."""
+import sys
 import time
 
 import numpy as np
@@ -8,7 +9,8 @@ import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
 
-WORK = "/data/umap_work"
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import WORK  # noqa: E402
 PREFIX = "Represent this sentence for searching relevant passages: "
 
 meta = pd.read_parquet(f"{WORK}/sample_meta.parquet", columns=["source", "text"])

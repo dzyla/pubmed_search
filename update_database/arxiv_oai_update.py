@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arxiv_download_embed_update as pipe  # noqa: E402  (shared paths, chunking, embedding)
 
 OAI_URL = "https://oaipmh.arxiv.org/oai"
-USER_AGENT = "ManuscriptSearch/2.0 (https://manuscript-search.org; mailto:contact@example.org)"
+USER_AGENT = pipe.mss_env.user_agent()
 STATE_FILE = os.path.join(pipe.COORDINATION_DIR, "oai_state.json")
 NS = {"oai": "http://www.openarchives.org/OAI/2.0/", "ax": "http://arxiv.org/OAI/arXiv/"}
 REQUEST_GAP_S = 3.0

@@ -17,3 +17,21 @@ api_keys.txt
 .pytest_cache/
 update_database/gpu_locks/
 update_database/**/gpu_locks/
+
+# Machine-specific and private files (kept outside this repository)
+config_mss.yaml
+paths.env
+*.env
+.config/
+zuliprc
+*.log
+*.pem
+*.key
+data/
+models/
+CLAUDE.md
+CLAUDE.local.md
+.claude/settings.local.json
+deploy/
+tools/backup_to_nas.sh
+tools/health_check.py

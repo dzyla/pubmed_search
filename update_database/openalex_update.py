@@ -49,7 +49,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from preprints_update import embed  # noqa: E402  (same model and settings as the other sources)
 
 API = "https://api.openalex.org/works"
-DEFAULT_BASE = "/data/mss"
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+DEFAULT_BASE = mss_env.data_root()
 FILTER = ("primary_topic.domain.id:1|4,has_abstract:true,language:en,has_pmid:false,indexed_in:!arxiv,"
           "is_xpac:false,type:article|review,has_doi:true,primary_location.source.is_core:true,is_retracted:false")
 SELECT = "id,doi,title,publication_date,type,biblio,primary_location,abstract_inverted_index,authorships,ids"

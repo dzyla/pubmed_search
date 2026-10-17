@@ -26,15 +26,17 @@ from unidecode import unidecode
 # ------------------------------------------------------------
 # PATHS & CONFIG
 # ------------------------------------------------------------
-DEST_DF_FOLDER    = '/data/mss/arxiv_df/'
-DEST_EMBED_FOLDER = '/data/mss/arxiv_embed/'
-COORDINATION_DIR  = '/data/mss/arxiv_coordination/'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+DEST_DF_FOLDER    = mss_env.data_path('arxiv_df', '')
+DEST_EMBED_FOLDER = mss_env.data_path('arxiv_embed', '')
+COORDINATION_DIR  = mss_env.data_path('arxiv_coordination', '')
 
 TASK_QUEUE_FILE  = os.path.join(COORDINATION_DIR, 'task_queue.json')
 MACHINE_STATUS_DIR = os.path.join(COORDINATION_DIR, 'machine_status/')
 GPU_LOCK_FOLDER  = f"gpu_locks/{socket.gethostname()}/"
 
-KAGGLE_DATASET_DIR = '/data/mss/arxiv_temp/kaggle_arxiv'
+KAGGLE_DATASET_DIR = mss_env.data_path('arxiv_temp', 'kaggle_arxiv')
 KAGGLE_JSON_FILE   = os.path.join(KAGGLE_DATASET_DIR, 'arxiv-metadata-oai-snapshot.json')
 
 HOSTNAME   = socket.gethostname()

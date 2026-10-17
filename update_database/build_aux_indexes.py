@@ -1,5 +1,5 @@
 """
-Builds the auxiliary search indexes on the pipeline desktop (weekly):
+Builds the auxiliary search indexes on the ingestion machine (weekly):
 
   1. Identifier index per source — for exact-term matching of gene symbols,
      variants, compound codes, trial ids (see identifiers.py). Postings are
@@ -7,8 +7,10 @@ Builds the auxiliary search indexes on the pipeline desktop (weekly):
   2. PubMed superseded rows — PubMed's daily update files re-issue revised
      records under the same PMID; every copy except the newest is listed so
      the server can hide it (no re-embedding, no re-upload of the data).
+  3. Paper-id lookup per source — DOI, PMID and arXiv id -> (file, row), so a
+     reader's library or a citation list can be matched to indexed papers.
 
-Output (synced to the server by the nightly rsync):
+Output (copied to the search server with the data):
     <base>/aux_index/<Source>/<version>/
         hash.npy      uint64, sorted unique token hashes
         offsets.npy   int64,  postings of token i are [offsets[i], offsets[i+1])
@@ -16,6 +18,8 @@ Output (synced to the server by the nightly rsync):
         row.npy       uint32, posting -> row in that file
         stems.json    file stems (same names as the .npy embedding files)
         superseded_stem.npy / superseded_row.npy   (PubMed only)
+        ids_hash.npy / ids_stem.npy / ids_row.npy  paper ids (DOI, PMID, arXiv id; see
+                      identifiers.row_id_keys) -> the newest row holding them
         zzz_complete.json   written last; the server only loads complete versions
 
     python build_aux_indexes.py                       # all sources
@@ -34,9 +38,10 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from identifiers import hash_tokens, identifier_tokens  # noqa: E402
+from identifiers import hash_tokens, identifier_tokens, row_id_keys, token_hash  # noqa: E402
 
-DEFAULT_BASE = "/data/mss"
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+DEFAULT_BASE = mss_env.data_root()
 DF_CAP = 20_000          # tokens in more documents than this are common words, not identifiers
 KEEP_VERSIONS = 2
 
@@ -55,10 +60,11 @@ SOURCES = {
 
 
 def _index_file(args):
-    """Tokenizes one parquet file -> (hashes, rows, pmids or None, n_rows)."""
-    stem, path, cols, want_pmid = args
+    """Tokenizes one parquet file -> (hashes, rows, pmids or None, id hashes, id rows, n_rows)."""
+    stem, path, cols, want_pmid, source = args
     schema = pq.read_schema(path)
-    use = [c for c in cols if c in schema.names] + (["pmid"] if want_pmid else [])
+    id_cols = [c for c in ("doi", "pmid") if c in schema.names]
+    use = list(dict.fromkeys([c for c in cols if c in schema.names] + id_cols + (["pmid"] if want_pmid else [])))
     table = pq.read_table(path, columns=use).to_pydict()
     n = len(table[use[0]]) if use else 0
     hashes, rows = [], []
@@ -69,13 +75,19 @@ def _index_file(args):
             h = hash_tokens(toks)
             hashes.append(h)
             rows.append(np.full(len(h), i, dtype=np.uint32))
+    id_hashes, id_rows = [], []
+    dois, row_pmids = table.get("doi"), table.get("pmid")
+    for i in range(n):
+        for key in row_id_keys(source, dois[i] if dois else None, row_pmids[i] if row_pmids else None):
+            id_hashes.append(token_hash(key))
+            id_rows.append(i)
     pmids = None
     if want_pmid:
         pmids = np.array([int(p) if str(p).isdigit() else -1 for p in table["pmid"]], dtype=np.int64)
     return (stem,
             np.concatenate(hashes) if hashes else np.empty(0, np.uint64),
             np.concatenate(rows) if rows else np.empty(0, np.uint32),
-            pmids, n)
+            pmids, np.array(id_hashes, dtype=np.uint64), np.array(id_rows, dtype=np.uint32), n)
 
 
 def build_source(name: str, base: str, workers: int):
@@ -95,17 +107,21 @@ def build_source(name: str, base: str, workers: int):
         if pq.ParquetFile(path).metadata.num_rows != n_emb:
             print(f"[{name}] {stem}: parquet rows != embeddings ({n_emb}); skipped")
             continue
-        jobs.append((stem, path, cols, name == "PubMed"))
+        jobs.append((stem, path, cols, name == "PubMed", name))
 
     t0 = time.time()
     stems, H, S, R, pmid_parts = [], [], [], [], []
+    IH, IS, IR = [], [], []
     with Pool(workers) as pool:
-        for k, (stem, h, r, pmids, n) in enumerate(pool.imap(_index_file, jobs, chunksize=4)):
+        for k, (stem, h, r, pmids, ih, ir, n) in enumerate(pool.imap(_index_file, jobs, chunksize=4)):
             sid = len(stems)
             stems.append(stem)
             H.append(h)
             R.append(r)
             S.append(np.full(len(h), sid, dtype=np.uint16))
+            IH.append(ih)
+            IR.append(ir)
+            IS.append(np.full(len(ih), sid, dtype=np.uint16))
             if pmids is not None:
                 pmid_parts.append((sid, pmids))
             if (k + 1) % 100 == 0:
@@ -134,9 +150,14 @@ def build_source(name: str, base: str, workers: int):
     np.save(os.path.join(out, "common.npy"), uniq[~keep])     # dropped as common: ignored in every source
     with open(os.path.join(out, "stems.json"), "w") as f:
         json.dump(stems, f)
+    ids_hash, ids_stem, ids_row = paper_id_table(np.concatenate(IH), np.concatenate(IS), np.concatenate(IR))
+    np.save(os.path.join(out, "ids_hash.npy"), ids_hash)
+    np.save(os.path.join(out, "ids_stem.npy"), ids_stem)
+    np.save(os.path.join(out, "ids_row.npy"), ids_row)
 
     meta = {"source": name, "version": version, "files": len(stems), "tokens": int(len(H_u)),
-            "postings": int(len(S)), "dropped_common_tokens": int((~keep).sum()), "df_cap": DF_CAP}
+            "postings": int(len(S)), "dropped_common_tokens": int((~keep).sum()), "df_cap": DF_CAP,
+            "paper_ids": int(len(ids_hash))}
     if pmid_parts:
         sup_stem, sup_row = superseded(pmid_parts)
         np.save(os.path.join(out, "superseded_stem.npy"), sup_stem)
@@ -148,6 +169,18 @@ def build_source(name: str, base: str, workers: int):
     for old in sorted(glob.glob(os.path.join(out_root, "*/")))[:-KEEP_VERSIONS]:
         shutil.rmtree(old, ignore_errors=True)
     print(f"[{name}] done: {json.dumps(meta)}")
+
+
+def paper_id_table(h, sid, row):
+    """Sorted unique id hashes with the (file, row) of their LAST occurrence: files are
+    in sorted order (chronological for PubMed), so that is the newest version."""
+    if not len(h):
+        return np.empty(0, np.uint64), np.empty(0, np.uint16), np.empty(0, np.uint32)
+    order = np.lexsort((row, sid, h))
+    h, sid, row = h[order], sid[order], row[order]
+    last = np.ones(len(h), dtype=bool)
+    last[:-1] = h[:-1] != h[1:]
+    return h[last], sid[last], row[last]
 
 
 def superseded(pmid_parts):

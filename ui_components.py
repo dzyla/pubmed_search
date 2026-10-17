@@ -26,8 +26,8 @@ SOURCE_COLORS = {"PubMed": INK, "BioRxiv": EOSIN, "MedRxiv": "#7A6FB0", "arXiv":
                  "OpenAlex": "#8C5A3C"}
 SOURCE_NAMES = {"PubMed": "PubMed", "BioRxiv": "bioRxiv", "MedRxiv": "medRxiv", "arXiv": "arXiv",
                 "ClinicalTrials": "ClinicalTrials.gov", "Preprints": "Other preprints", "OpenAlex": "Other journals",
-                "Grants": "NIH grants"}
-_NO_CITATIONS = {"arXiv", "ClinicalTrials", "Grants"}   # no Crossref DOI to count citations for
+                "Grants": "NIH grants", "External": "Not in this index"}
+_NO_CITATIONS = {"arXiv", "ClinicalTrials", "Grants", "External"}   # no Crossref DOI to count citations for
 _SERVER_NAMES = {"biorxiv": "bioRxiv", "medrxiv": "medRxiv"}
 
 _CSS = f"""
@@ -78,6 +78,8 @@ _CSS = f"""
   .mss-src {{ font-weight: 600; }}
   .mss-tag {{ border: 1px solid {RULE}; border-radius: 0.3rem; padding: 0.05rem 0.4rem; color: {INK}; }}
   .mss-exact {{ border-color: {EOSIN}; color: {EOSIN}; font-weight: 600; }}
+  .mss-published {{ border-color: #3E7D5A; color: #2F6B4A; background: #EEF6F1; font-weight: 600; }}
+  .mss-preprint {{ border-color: #B7832F; color: #8A5E17; background: #FBF4E8; font-weight: 600; }}
 
   /* Per-result actions (select / similar), aligned with the entry text */
   [class*="st-key-actions_"] {{ margin-left: 2.6rem; margin-top: -0.2rem; }}
@@ -285,7 +287,8 @@ def render_entry(row, rank: int, citations, top_score: float, term_display: dict
     source = str(row.get("source", ""))
     labels = [lab for lab in (row.get("labels") or []) if lab != "Retracted"]
     score = float(row.get("score") or 0)
-    pct = max(4, min(100, round(100 * (score - 0.5) / max(top_score - 0.5, 1e-6))))
+    # top_score None: an unranked list (citations), so no relevance meter
+    pct = None if top_score is None else max(4, min(100, round(100 * (score - 0.5) / max(top_score - 0.5, 1e-6))))
     facts = [f'<span class="mss-src" style="color:{SOURCE_COLORS.get(source, INK)}">'
              f'{_e(SOURCE_NAMES.get(source, source))}</span>']
     matched = row.get("matched_terms")
@@ -293,15 +296,20 @@ def render_entry(row, rank: int, citations, top_score: float, term_display: dict
         shown = ", ".join((term_display or {}).get(t, t) for t in matched)
         facts.append(f'<span class="mss-tag mss-exact" title="Contains these terms from your query">'
                      f'matches {_e(shown)}</span>')
-    facts += [f'<span class="mss-tag">{_e(lab)}</span>' for lab in labels]
-    if source in _NO_CITATIONS:
+    status_class = {"Published": " mss-published", "Preprint": " mss-preprint"}
+    facts += [f'<span class="mss-tag{status_class.get(lab, "")}">{_e(lab)}</span>' for lab in labels]
+    cited_by = row.get("cited_by_count")
+    if cited_by is not None and pd.notna(cited_by):           # counted by OpenAlex (citation lists)
+        facts.append(f"<span>cited {int(cited_by):,} time{'s' if cited_by != 1 else ''}</span>")
+    elif source in _NO_CITATIONS:
         pass
     elif citations is None:
         facts.append("<span>counting citations…</span>")
     else:
         facts.append(f"<span>cited {int(citations):,} time{'s' if citations != 1 else ''}</span>")
-    facts.append(f'<span class="mss-meter" title="Relevance relative to the best match '
-                 f'(similarity {score:.3f})" aria-hidden="true"><span style="width:{pct}%"></span></span>')
+    if pct is not None:
+        facts.append(f'<span class="mss-meter" title="Relevance relative to the best match '
+                     f'(similarity {score:.3f})" aria-hidden="true"><span style="width:{pct}%"></span></span>')
 
     abstract = tidy_abstract(row.get("abstract"))
     snippet = abstract if len(abstract) <= 320 else abstract[:300].rsplit(" ", 1)[0] + " …"

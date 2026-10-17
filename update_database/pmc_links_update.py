@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 from datetime import date
@@ -26,7 +27,9 @@ import pandas as pd
 import requests
 
 URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/PMC-ids.csv.gz"
-DEFAULT_BASE = "/data/mss"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+DEFAULT_BASE = mss_env.data_root()
 KEEP_VERSIONS = 2
 
 

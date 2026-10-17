@@ -1,7 +1,7 @@
 # Expanding the search: which databases to add
 
 *Researched 2026-10-09 (live API counts where marked). Constraint that shapes every
-choice: the binary index lives in RAM on a 7.8 GB, 4-vCPU server, so each
+choice: the binary index lives in RAM on a small CPU-only server, so each
 1M documents costs ~48 MB of RAM and ~0.1 s more brute-force scan per search.
 Additions must bring unique (non-PubMed) content with clean licensing and a
 practical incremental update path.*
@@ -17,7 +17,7 @@ practical incremental update path.*
 | 5 | Europe PMC Agricola (conditional) | ~703k | ~34 MB | Agriculture/veterinary coverage; dedupe vs PubMed and confirm reuse terms first |
 
 All five together: ~2.5M documents, ~130 MB RAM, ~+0.25 s per search — affordable
-once the backend holds the only index copy (see deploy/).
+once the backend holds the only index copy.
 
 **Later, deliberately:** a domain-filtered OpenAlex subset (~15–18M docs, ~0.8 GB RAM,
 ~+1.5 s/search). CC0 dataset, but abstracts only as an inverted index and free updates
@@ -31,7 +31,7 @@ per-publisher copyright), Zenodo/DOAJ (noise). Use PMC OA and Sciety/eLife revie
 
 ## How to add a source in this codebase
 
-1. **Pipeline** (`update_database/`, runs on the GPU desktop): write `<name>_df/*.parquet`
+1. **Pipeline** (`update_database/`, runs on a GPU machine): write `<name>_df/*.parquet`
    with at least `title, abstract, date (YYYY-MM-DD), doi, authors, journal` and the
    matching `*.npy` (BGE-small, `"title. abstract"`, **no** query prefix, `np.packbits(emb > 0)`),
    row i of each parquet = row i of its `.npy`. Use `row_group_size=2000`.

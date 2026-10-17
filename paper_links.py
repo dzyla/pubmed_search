@@ -112,6 +112,25 @@ def primary_link(row):
     return links[0][1] if links else None
 
 
+STATUS_LABELS = ("Published", "Preprint")
+
+
+def publication_status(row) -> str:
+    """'Published' (a journal version exists), 'Preprint' (not yet), or '' for grants,
+    trials and conference abstracts, where neither applies."""
+    source = _clean(row.get("source"))
+    if source in ("Grants", "ClinicalTrials"):
+        return ""
+    if source in (*_PREPRINT_SERVERS, "Preprints", "arXiv"):
+        return "Published" if _clean(row.get("published_doi")) or _clean(row.get("published_pmid")) else "Preprint"
+    types = _publication_types(row)
+    if "Conference abstract" in types:
+        return ""
+    if "Preprint" in types:          # PubMed also lists some preprints (NIH Preprint Pilot)
+        return "Preprint"
+    return "Published" if source in ("PubMed", "OpenAlex", "External") else ""
+
+
 def badges(row) -> list:
     """Short labels for notable publication types; 'Retracted' always comes first."""
     if _clean(row.get("grant_id")):
@@ -128,9 +147,11 @@ def badges(row) -> list:
     labels = [label for name, label in _TYPE_BADGES if name in types]
     if is_retracted(row) and "Retracted" not in labels:
         labels.insert(0, "Retracted")
-    if _clean(row.get("source")) in (*_PREPRINT_SERVERS, "Preprints"):
-        labels.append("Published" if _clean(row.get("published_doi")) or _clean(row.get("published_pmid"))
-                      else "Preprint")
+    # Every paper says whether it is published or a preprint, right after "Retracted".
+    labels = [lab for lab in labels if lab not in STATUS_LABELS]
+    status = publication_status(row)
+    if status:
+        labels.insert(1 if labels[:1] == ["Retracted"] else 0, status)
     if _clean(row.get("preprint_doi")):
         labels.append("Has preprint")
     if _clean(row.get("pmcid")).startswith("PMC"):

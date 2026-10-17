@@ -55,14 +55,19 @@ import numpy as np
 import access
 import embedder
 import paper_links
+import reranker
 from config_loader import DEFAULT_SOURCES, read_source_configs
 from mcp_server import SOURCES, SearchFailed, build_mcp
 import pandas as pd
 from map_index import MapIndex
 from search_logic import (
-    _SEARCHER_CACHE, UnknownReference, combined_search_orchestrator, get_or_create_searcher, similar_search,
-    trigger_database_updates, warm_up_indexes,
+    _SEARCHER_CACHE, UnknownReference, alert_calibration, combined_search_orchestrator, get_or_create_searcher,
+    LIBRARY_MAX_IDS, _SOURCE_NAMES, fetch_papers, library_search, parse_ref, resolve_paper_ids, similar_search, trigger_database_updates,
+    warm_up_indexes,
 )
+from identifiers import parse_paper_ids, row_id_keys
+import cite_graph
+import alerts
 from utils import get_clean_doi
 
 # ---------------------------------------------------------------------------
@@ -90,7 +95,8 @@ UPDATE_INTERVAL_S = int(os.environ.get("MSS_UPDATE_INTERVAL_S", str(60 * 60)))
 
 # Limits per caller tier. The UI (internal key) may ask for more.
 PUBLIC_MAX_TOP_K, PUBLIC_MAX_QUERY_CHARS = 10, 2000
-INTERNAL_MAX_TOP_K, INTERNAL_MAX_QUERY_CHARS = 50, 8192
+INTERNAL_MAX_TOP_K = int(os.environ.get("MSS_INTERNAL_MAX_TOP_K", "100"))
+INTERNAL_MAX_QUERY_CHARS = 8192
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +194,8 @@ class SearchRequest(BaseModel):
         "Only papers published on or before this date (YYYY-MM-DD)."))
     high_quality_only: bool = Field(default=True, description=(
         "Exclude papers with very short or missing abstracts."))
+    precise: bool = Field(default=False, description=(
+        "Website only: re-rank the first 10 results with a biomedical cross-encoder (slower)."))
     sources: Optional[List[SourceName]] = Field(default=None, description=(
         "Restrict to these databases; all except Grants if omitted."))
 
@@ -244,6 +252,12 @@ class Paper(BaseModel):
         "Stable reference for /v1/similar and the find_similar MCP tool, e.g. 'PubMed:123456'."))
     map_xy: Optional[List[float]] = Field(default=None, description=(
         "Position on the paper map (map coordinates, see /v1/map), when the map is available."))
+    cited_by_count: Optional[int] = Field(default=None, description=(
+        "For /v1/citations: how often this paper is cited (OpenAlex)."))
+    in_index: bool = Field(default=True, description=(
+        "False for /v1/citations results that are not in this index (OpenAlex metadata only)."))
+    theme: Optional[int] = Field(default=None, description=(
+        "For /v1/library: index into the response's `themes` this paper was found for."))
 
 
 class SearchResponse(BaseModel):
@@ -256,6 +270,19 @@ class SearchResponse(BaseModel):
     total_results: int
     search_time_seconds: float
     results: List[Paper]
+    themes: List["Theme"] = Field(default_factory=list, description=(
+        "For /v1/library: groups of related papers in the library, largest first."))
+    not_found: List[str] = Field(default_factory=list, description=(
+        "For /v1/library: identifiers that are not in the index (at most 100 listed)."))
+
+
+class Theme(BaseModel):
+    label: str = Field(description="Title of the theme's most central paper.")
+    size: int = Field(description="Number of library papers in this theme.")
+    seed_refs: List[str] = Field(default_factory=list, description="The library papers in this theme.")
+
+
+SearchResponse.model_rebuild()
 
 
 def _optional_str(value) -> Optional[str]:
@@ -295,6 +322,9 @@ def _to_paper(row) -> Paper:
         pmcid=_optional_str(row.get("pmcid")),
         registry_id=_optional_str(row.get("nct_id")) or _optional_str(row.get("grant_id")),
         ref=_ref(row),
+        theme=int(row["theme"]) if "theme" in row and pd.notna(row.get("theme")) else None,
+        cited_by_count=int(row["cited_by_count"]) if pd.notna(row.get("cited_by_count")) else None,
+        in_index=str(row.get("source", "")) != "External",
     )
 
 
@@ -391,21 +421,135 @@ async def run_similar(refs: List[str], top_k: int = 10, start_date: Optional[str
     return response.model_dump()
 
 
-async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = None,
-                     end_date: Optional[str] = None, high_quality_only: bool = True,
-                     sources: Optional[List[str]] = None) -> dict:
-    """Embeds the query and searches; raises SearchFailed with a client-safe message."""
+async def run_library(ids: List[str], top_k: int = 10, start_date: Optional[str] = None,
+                      end_date: Optional[str] = None, high_quality_only: bool = True,
+                      sources: Optional[List[str]] = None) -> dict:
+    """Papers like a library of DOIs / PMIDs / arXiv ids, grouped by theme."""
     if CONFIGS is None:
         raise SearchFailed("Search index configuration is unavailable.")
     await _acquire_slot()
-
     t0 = time.perf_counter()
     try:
+        found, missing = await asyncio.to_thread(resolve_paper_ids, ids, CONFIGS)
+        pairs = list(dict.fromkeys(found.values()))      # a DOI and a PMID of one paper count once
+        if not pairs:
+            raise BadReference("None of these papers is in the index. Check that the list holds "
+                               "DOIs, PubMed ids or arXiv ids.")
+        df, seeds, themes, packed = await asyncio.to_thread(
+            library_search, pairs, CONFIGS, _configs_for(sources), top_k, start_date, end_date,
+            high_quality_only)
+    except BadReference:
+        raise
+    except UnknownReference as exc:
+        raise BadReference(str(exc)) from None
+    except Exception as exc:
+        LOGGER.exception("Library search failed")
+        raise SearchFailed("Search failed. Please try again later.") from exc
+    finally:
+        _SEARCH_SLOTS.release()
+    elapsed = round(time.perf_counter() - t0, 2)
+    LOGGER.info(f"Library ({len(ids)} ids, {len(pairs)} found, {len(themes)} themes) → "
+                f"{len(df)} results in {elapsed}s")
+    response = SearchResponse(
+        query=f"Papers like your library ({len(pairs)} papers)", seeds=[_to_paper(pd.Series(sd)) for sd in seeds],
+        query_bits=packed.tobytes().hex(), total_results=len(df), search_time_seconds=elapsed,
+        results=[_to_paper(row) for _, row in df.iterrows()],
+        themes=[Theme(**t) for t in themes], not_found=missing[:100],
+    )
+    response = await asyncio.to_thread(_with_map, response, [r for _, r in df.iterrows()], list(seeds), packed)
+    return response.model_dump()
+
+
+def _citation_lookup(ref: Optional[str], doi: Optional[str], pmid: Optional[str], direction: str, top_k: int):
+    """(the paper's row or None, OpenAlex work or {}, result rows) — blocking; run in a thread."""
+    seed = None
+    if ref:
+        source, cid = parse_ref(ref)
+        seed = fetch_papers([(source, cid)], CONFIGS).get((source, cid))
+        if seed is None:
+            raise UnknownReference(f"{ref} does not exist")
+        for key in row_id_keys(source, seed.get("doi"), seed.get("pmid")):
+            kind, _, value = key.partition(":")
+            if kind == "doi" and not doi:
+                doi = value
+            elif kind == "pmid" and not pmid:
+                pmid = value
+    work = cite_graph.find_work(doi=doi, pmid=pmid)
+    if not work:
+        return seed, {}, []
+    works = cite_graph.cited_by(work, top_k) if direction == "cited_by" else cite_graph.references(work, top_k)
+    keys = [cite_graph.work_keys(w) for w in works]
+    found, _ = resolve_paper_ids([k for ks in keys for k in ks], CONFIGS)
+    hits = [next((found[k] for k in ks if k in found), None) for ks in keys]
+    indexed = fetch_papers([h for h in hits if h], CONFIGS)
+    rows, seen = [], set()
+    for w, hit in zip(works, hits):
+        mark = hit or w.get("id")
+        if mark in seen:
+            continue
+        seen.add(mark)
+        row = dict(indexed[hit]) if hit in indexed else cite_graph.work_row(w)
+        row["cited_by_count"] = w.get("cited_by_count")
+        rows.append(row)
+    return seed, work, rows
+
+
+async def run_citations(ref: Optional[str] = None, doi: Optional[str] = None, pmid: Optional[str] = None,
+                        direction: str = "cited_by", top_k: int = 50) -> dict:
+    """Papers citing one paper, or the papers it cites (OpenAlex), matched to the index."""
+    if CONFIGS is None:
+        raise SearchFailed("Search index configuration is unavailable.")
+    t0 = time.perf_counter()
+    try:
+        seed, work, rows = await asyncio.to_thread(_citation_lookup, ref, doi, pmid, direction, top_k)
+    except UnknownReference as exc:
+        raise BadReference(str(exc)) from None
+    except cite_graph.CitationsUnavailable as exc:
+        raise SearchFailed(str(exc)) from None
+    except Exception as exc:
+        LOGGER.exception("Citation lookup failed")
+        raise SearchFailed("Citation lookup failed. Please try again later.") from exc
+    elapsed = round(time.perf_counter() - t0, 2)
+    total = (work.get("cited_by_count") or 0) if direction == "cited_by" else len(work.get("referenced_works") or [])
+    in_index = sum(1 for r in rows if r.get("source") != "External")
+    LOGGER.info(f"Citations ({direction}) → {len(rows)} papers, {in_index} indexed, in {elapsed}s")
+    title = (seed or {}).get("title") or work.get("display_name") or doi or pmid or ""
+    return SearchResponse(
+        query=f"{'Cited by' if direction == 'cited_by' else 'References of'}: {title}"[:500],
+        seeds=[_to_paper(pd.Series(seed))] if seed else [], total_results=int(total),
+        search_time_seconds=elapsed, results=[_to_paper(pd.Series(r)) for r in rows],
+    ).model_dump()
+
+
+async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = None,
+                     end_date: Optional[str] = None, high_quality_only: bool = True,
+                     sources: Optional[List[str]] = None, precise: bool = False) -> dict:
+    """Embeds the query and searches; raises SearchFailed with a client-safe message."""
+    if CONFIGS is None:
+        raise SearchFailed("Search index configuration is unavailable.")
+    t_queue = time.perf_counter()
+    await _acquire_slot()
+
+    t0 = time.perf_counter()
+    stages = {"queue": t0 - t_queue}
+    try:
         packed, query_float = await asyncio.to_thread(embedder.encode_query, query)
+        stages["embed"] = time.perf_counter() - t0
+        t = time.perf_counter()
+        precise = precise and await asyncio.to_thread(reranker.available)
+        stages["rr_load"] = time.perf_counter() - t      # > 0.1 s: the reranker was (re)loaded
+        t = time.perf_counter()
         results_df = await asyncio.to_thread(
-            combined_search_orchestrator, packed, _configs_for(sources), top_k,
+            combined_search_orchestrator, packed, _configs_for(sources),
+            max(top_k, reranker.CANDIDATES) if precise else top_k,
             start_date, end_date, high_quality_only, query_float, query,
         )
+        stages["search"] = time.perf_counter() - t
+        stages.update(results_df.attrs.get("timings", {}))
+        if precise:
+            t = time.perf_counter()
+            results_df = (await asyncio.to_thread(reranker.rerank, results_df, query)).head(top_k)
+            stages["rerank"] = time.perf_counter() - t
     except embedder.EmbeddingError as exc:
         raise SearchFailed("Embedding model unavailable. Please try again later.") from exc
     except Exception as exc:
@@ -419,7 +563,16 @@ async def run_search(query: str, top_k: int = 10, start_date: Optional[str] = No
     papers = [_to_paper(row) for _, row in results_df.iterrows()]
     response = SearchResponse(query=query, query_bits=packed.tobytes().hex(), total_results=len(papers),
                               search_time_seconds=elapsed, results=papers)
+    t = time.perf_counter()
     response = await asyncio.to_thread(_with_map, response, [r for _, r in results_df.iterrows()], [], packed)
+    stages["map"] = time.perf_counter() - t
+    # one line per search, no query text: tools/usage_report.py can parse it
+    LOGGER.info("Search timing " + json.dumps({
+        "total": elapsed, "chars": len(query), "top_k": top_k, "n": len(papers),
+        "date": bool(start_date or end_date), "precise": bool(precise),
+        "sources": len(sources) if sources else 0,
+        **{k: round(v, 3) if isinstance(v, float) else v for k, v in stages.items()},
+    }))
     return response.model_dump()
 
 
@@ -482,11 +635,14 @@ mcp = build_mcp(
     stats=get_stats,
     similar=lambda **kw: run_similar(**kw, high_quality_only=True),
     max_top_k=PUBLIC_MAX_TOP_K,
+    library=lambda ids, **kw: run_library(parse_paper_ids("\n".join(ids), limit=LIBRARY_MAX_IDS), **kw,
+                                          high_quality_only=True),
+    citations=run_citations,
 )
 _mcp_app = mcp.streamable_http_app()   # also creates mcp.session_manager
 
 
-_QUOTA_TOOLS = {"search_papers", "find_similar"}
+_QUOTA_TOOLS = {"search_papers", "find_similar", "find_papers_like", "get_citations"}
 
 
 class _McpAccess:
@@ -568,8 +724,15 @@ async def _periodic_update_checker():
                 if await asyncio.to_thread(trigger_database_updates, CONFIGS):
                     LOGGER.info("Periodic update: new data found and indexed.")
                     _STATS_CACHE["value"] = None
+                    # Rebuild the evicted chunk indexes now, not in the next user's search (3-5 s).
+                    await asyncio.to_thread(warm_up_indexes, CONFIGS, False)
+                    await asyncio.to_thread(_run_alerts)
             except Exception as exc:
                 LOGGER.error(f"Periodic update check failed: {exc}")
+        try:
+            await asyncio.to_thread(reranker.unload_if_idle)
+        except Exception as exc:
+            LOGGER.error(f"Reranker unload failed: {exc}")
 
 
 @asynccontextmanager
@@ -594,6 +757,7 @@ async def lifespan(app_: FastAPI):
         except Exception as exc:
             LOGGER.error(f"Startup update check failed: {exc}")
         warm_up_indexes(CONFIGS, background=True)
+        tasks.append(asyncio.create_task(asyncio.to_thread(_run_alerts)))   # data may have changed while down
         if MAP is not None:
             try:
                 await asyncio.to_thread(MAP.refresh)
@@ -726,6 +890,7 @@ async def search(req: SearchRequest, response: Response, caller: Caller = Depend
             req.start_date.isoformat() if req.start_date else None,
             req.end_date.isoformat() if req.end_date else None,
             req.high_quality_only, req.sources,
+            precise=req.precise and caller.tier == "internal",   # CPU-heavy: the website only
         )
     except ServerBusy as exc:
         raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from None
@@ -760,6 +925,81 @@ async def similar(req: SimilarRequest, response: Response, caller: Caller = Depe
         raise HTTPException(status_code=500, detail=str(exc)) from None
 
 
+class LibraryRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list, max_length=LIBRARY_MAX_IDS, description=(
+        f"Up to {LIBRARY_MAX_IDS} DOIs, PubMed ids or arXiv ids of papers you know."))
+    text: Optional[str] = Field(default=None, max_length=5_000_000, description=(
+        "Alternatively, the text of a BibTeX, RIS, PubMed (.nbib) or CSV export, or any list: "
+        "DOIs, PMIDs and arXiv ids are picked out of it."))
+    top_k: int = Field(default=20, ge=1, le=INTERNAL_MAX_TOP_K, description=f"Number of results, 1-{PUBLIC_MAX_TOP_K}.")
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    high_quality_only: bool = True
+    sources: Optional[List[SourceName]] = None
+
+
+@app.post("/v1/library", response_model=SearchResponse, tags=["search"],
+          summary="Papers like your library (DOIs, PMIDs or a reference-manager export)")
+async def library(req: LibraryRequest, response: Response, caller: Caller = Depends(_caller)):
+    """
+    Pass your papers as `ids` (DOIs, PubMed ids, arXiv ids) or as the `text` of a BibTeX /
+    RIS / PubMed export. They are matched to indexed papers, grouped into up to four themes,
+    and each theme is searched for papers you do not have yet. `themes` names the groups;
+    each result's `theme` says which group it was found for; `not_found` lists ids that are
+    not in the index.
+    """
+    max_top_k = INTERNAL_MAX_TOP_K if caller.tier == "internal" else PUBLIC_MAX_TOP_K
+    if req.top_k > max_top_k:
+        raise HTTPException(status_code=422, detail=f"top_k must be between 1 and {max_top_k}.")
+    if req.start_date and req.end_date and req.start_date > req.end_date:
+        raise HTTPException(status_code=422, detail="start_date must not be after end_date.")
+    keys = parse_paper_ids("\n".join(req.ids) + "\n" + (req.text or ""), limit=LIBRARY_MAX_IDS)
+    if not keys:
+        raise HTTPException(status_code=422, detail=(
+            "No DOIs, PubMed ids or arXiv ids found. Put one per line, or paste a BibTeX / RIS export."))
+    _charge(caller, response)
+    try:
+        return await run_library(keys, req.top_k,
+                                 req.start_date.isoformat() if req.start_date else None,
+                                 req.end_date.isoformat() if req.end_date else None,
+                                 req.high_quality_only, req.sources)
+    except BadReference as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except ServerBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "10"}) from None
+    except SearchFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from None
+
+
+class CitationRequest(BaseModel):
+    ref: Optional[str] = Field(default=None, description="A result's `ref`, e.g. 'PubMed:123456'.")
+    doi: Optional[str] = Field(default=None, description="Or the paper's DOI.")
+    pmid: Optional[str] = Field(default=None, description="Or its PubMed id.")
+    direction: Literal["cited_by", "references"] = Field(default="cited_by", description=(
+        "'cited_by': papers that cite it, most cited first; 'references': papers it cites, newest first."))
+    top_k: int = Field(default=50, ge=1, le=cite_graph.MAX_RESULTS)
+
+
+@app.post("/v1/citations", response_model=SearchResponse, tags=["search"],
+          summary="Papers that cite a paper, or that it cites")
+async def citations_endpoint(req: CitationRequest, response: Response, caller: Caller = Depends(_caller)):
+    """
+    Citation links from OpenAlex, matched to this index: indexed papers come with the usual
+    labels and links (and a `ref` for /v1/similar); others have `in_index: false`.
+    `total_results` is the paper's total citation (or reference) count.
+    """
+    if not (req.ref or req.doi or req.pmid):
+        raise HTTPException(status_code=422, detail="Give a ref, a DOI or a PubMed id.")
+    max_top_k = cite_graph.MAX_RESULTS if caller.tier == "internal" else PUBLIC_MAX_TOP_K
+    _charge(caller, response)
+    try:
+        return await run_citations(req.ref, req.doi, req.pmid, req.direction, min(req.top_k, max_top_k))
+    except BadReference as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except SearchFailed as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
 # ---------------------------------------------------------------------------
 # Paper map
 # ---------------------------------------------------------------------------
@@ -773,6 +1013,115 @@ def _require_map():
     if MAP is None or not MAP.loaded:
         raise HTTPException(status_code=503, detail="The paper map is not available right now.")
     return MAP
+
+
+# ---------------------------------------------------------------------------
+# Saved-search alerts (alerts.py): private RSS feeds of new matching papers
+# ---------------------------------------------------------------------------
+PUBLIC_URL = os.environ.get("MSS_PUBLIC_URL", "https://manuscript-search.org").rstrip("/")
+_TOKEN_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+
+class AlertRequest(BaseModel):
+    query: str = Field(..., min_length=3, max_length=PUBLIC_MAX_QUERY_CHARS)
+    sources: Optional[List[SourceName]] = None
+    sensitivity: Literal["focused", "balanced", "broad"] = "balanced"
+
+
+def _feed_url(token: str) -> str:
+    return f"{PUBLIC_URL}/v1/alerts/{token}/feed.xml"
+
+
+def _alert_searchers() -> dict:
+    return {name: get_or_create_searcher(cfg) for name, cfg in zip(SOURCES, CONFIGS or []) if cfg}
+
+
+def _recalibrate_alerts():
+    """Recomputes bars set by an older calibration (alerts.CALIBRATION) and prunes items below them."""
+    for a in alerts.stale_calibrations():
+        try:
+            vec = a["vec"]
+            cal = alert_calibration(np.packbits(vec > 0)[None, :], vec, _configs_for(a["sources"]), a["rank"],
+                                    alerts.SEED_DAYS)
+            if cal["threshold"] is None:
+                continue
+            removed = alerts.set_threshold(a["token"], cal["threshold"])
+            LOGGER.info(f"Alert {a['token'][:6]}… recalibrated: bar {cal['threshold']:.4f}, "
+                        f"{removed} item(s) below it removed")
+        except Exception:
+            LOGGER.exception(f"Recalibrating alert {a['token'][:6]}… failed")
+
+
+def _run_alerts():
+    try:
+        _recalibrate_alerts()
+        alerts.run(_alert_searchers())
+    except Exception:
+        LOGGER.exception("Alert matching failed")
+
+
+@app.post("/v1/alerts", include_in_schema=False)
+async def create_alert(req: AlertRequest, caller: Caller = Depends(_caller)):
+    """Saves a search; new papers that would rank in its top N appear in a private RSS feed (UI only)."""
+    if caller.tier != "internal":
+        raise HTTPException(status_code=403, detail="Alerts are created from the website.")
+    sources = list(req.sources or DEFAULT_SOURCES)
+    await _acquire_slot()
+    try:
+        packed, query_float = await asyncio.to_thread(embedder.encode_query, req.query)
+        cal = await asyncio.to_thread(alert_calibration, packed, query_float, _configs_for(sources),
+                                      alerts.SENSITIVITY[req.sensitivity], alerts.SEED_DAYS)
+    except embedder.EmbeddingError:
+        raise HTTPException(status_code=503, detail="Embedding model unavailable. Please try again later.") from None
+    finally:
+        _SEARCH_SLOTS.release()
+    if cal["threshold"] is None:
+        raise HTTPException(status_code=422, detail="Nothing matches this search yet, so it cannot be saved.")
+    try:
+        token = await asyncio.to_thread(alerts.create, req.query, sources, query_float, cal["threshold"],
+                                        req.sensitivity)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    # seed the feed with matching papers from the last weeks
+    seed = cal["recent"][:alerts.MAX_ITEMS_PER_RUN]
+    rows = []
+    for name in {c["source"] for c in seed}:
+        df = await asyncio.to_thread(cal["searchers"][name].fetch_rows, [c for c in seed if c["source"] == name])
+        rows += [dict(_to_paper(dict(r, source=name)).model_dump(), score=float(r["score"]))
+                 for r in df.to_dict("records")]
+    await asyncio.to_thread(alerts.add_items, token, rows)
+    return {"token": token, "feed_url": _feed_url(token), "sensitivity": req.sensitivity,
+            "per_month_estimate": round(cal["last_year"] / 12, 1), "seeded": len(rows)}
+
+
+@app.get("/v1/alerts/{token}", include_in_schema=False)
+async def get_alert(token: str):
+    if not _TOKEN_RE.match(token):
+        raise HTTPException(status_code=404, detail="No such alert.")
+    alert = await asyncio.to_thread(alerts.get, token)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="No such alert (it may have expired after 6 months unused).")
+    alert.pop("threshold", None)
+    alert["feed_url"] = _feed_url(token)
+    alert["items"] = await asyncio.to_thread(alerts.items, token, 50)
+    return alert
+
+
+@app.delete("/v1/alerts/{token}", include_in_schema=False)
+async def delete_alert(token: str):
+    if not _TOKEN_RE.match(token) or not await asyncio.to_thread(alerts.delete, token):
+        raise HTTPException(status_code=404, detail="No such alert.")
+    return {"deleted": True}
+
+
+@app.get("/v1/alerts/{token}/feed.xml", include_in_schema=False)
+async def alert_feed(token: str):
+    xml = None
+    if _TOKEN_RE.match(token):
+        xml = await asyncio.to_thread(alerts.rss, token, _feed_url(token), PUBLIC_URL)
+    if xml is None:
+        raise HTTPException(status_code=404, detail="No such alert.")
+    return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
 
 
 @app.get("/v1/map", tags=["map"], summary="Paper map: version, coordinate system, topic labels")

@@ -24,6 +24,7 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 from datetime import date, datetime
 
@@ -32,8 +33,10 @@ import pandas as pd
 import requests
 
 API = "https://clinicaltrials.gov/api/v2/studies"
-USER_AGENT = "ManuscriptSearch/2.0 (https://manuscript-search.org; mailto:contact@example.org)"
-DEFAULT_BASE = "/data/mss"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+USER_AGENT = mss_env.user_agent()
+DEFAULT_BASE = mss_env.data_root()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_ROWS = 25_000
 PAGE_SIZE = 1000

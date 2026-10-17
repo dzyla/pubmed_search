@@ -1,5 +1,5 @@
 """Demo of the per-query endpoint: place a query and its top-50 hits on the map, CPU only
-(simulates the 4-vCPU server: faiss IndexBinaryFlat over the 1.52M reference codes + geometric median).
+(simulates a small CPU-only server: faiss IndexBinaryFlat over the 1.52M reference codes + geometric median).
 Hits come from the 1.52M sample (stand-in for the production search) to keep the demo self-contained.
   python demo_query.py <map_dir> <out.png> "query 1" "query 2" ...
 """
@@ -17,7 +17,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 
-WORK = "/data/umap_work"
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import WORK  # noqa: E402
 PREFIX = "Represent this sentence for searching relevant passages: "
 REF = "otsne_float_ex2"
 

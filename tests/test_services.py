@@ -2,6 +2,7 @@
 No network, no model download: the embedding model is stubbed."""
 import asyncio
 import sqlite3
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -35,7 +36,7 @@ def test_search_returns_rich_results(backend):
     assert all(p["year"] == 2015 and p["date"].startswith("2015") for p in papers)
     assert all(p["url"].startswith("https://doi.org/10.1234/") for p in papers)
     assert all(p["links"][0] == {"label": "DOI", "url": p["url"]} for p in papers)
-    assert all(p["labels"] == [] and p["retracted"] is False for p in papers)
+    assert all(p["labels"] == ["Published"] and p["retracted"] is False for p in papers)
 
 
 def test_v1_alias_and_sources_filter(backend):
@@ -179,7 +180,8 @@ def test_mcp_initialize_list_and_call(backend):
     assert init.json()["result"]["serverInfo"]["name"] == "Manuscript Search"
 
     tools = _rpc(client, "tools/list", rid=2).json()["result"]["tools"]
-    assert {t["name"] for t in tools} == {"search_papers", "database_info", "find_similar"}
+    assert {t["name"] for t in tools} == {"search_papers", "database_info", "find_similar", "find_papers_like",
+                                          "get_citations"}
 
     call = _rpc(client, "tools/call", {"name": "search_papers", "arguments": {
         "query": "binary embeddings for literature search", "top_k": 3,
@@ -258,3 +260,87 @@ def test_forwarded_ip_trusted_only_from_local_proxy():
     import search_api
     assert search_api._client_ip("127.0.0.1", {"x-real-ip": "203.0.113.5"}) == "203.0.113.5"
     assert search_api._client_ip("198.51.100.2", {"x-real-ip": "203.0.113.5"}) == "198.51.100.2"
+
+
+def test_alert_api_round_trip(backend, monkeypatch):
+    client, search_api = backend
+    assert client.post("/v1/alerts", json={"query": "some topic"}, headers=PUBLIC).status_code == 403
+    r = client.post("/v1/alerts", json={"query": "some topic", "sources": ["PubMed"], "sensitivity": "broad"},
+                    headers=INTERNAL)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    token = body["token"]
+    assert body["feed_url"].endswith(f"/v1/alerts/{token}/feed.xml")
+    info = client.get(f"/v1/alerts/{token}").json()
+    assert info["query"] == "some topic" and info["sources"] == ["PubMed"] and "threshold" not in info
+    feed = client.get(f"/v1/alerts/{token}/feed.xml")
+    assert feed.status_code == 200 and feed.headers["content-type"].startswith("application/rss+xml")
+    ET.fromstring(feed.text)
+    assert client.delete(f"/v1/alerts/{token}").status_code == 200
+    assert client.get(f"/v1/alerts/{token}").status_code == 404
+    assert client.get("/v1/alerts/short").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Citations (OpenAlex stubbed) and library search
+# ---------------------------------------------------------------------------
+
+def test_citations_mark_indexed_and_external_papers(backend, monkeypatch):
+    client, api = backend
+    works = [{"id": "https://openalex.org/W1", "ids": {"doi": "https://doi.org/10.1234/test.0.5"},
+              "display_name": "Paper 0-5", "cited_by_count": 9},
+             {"id": "https://openalex.org/W2", "ids": {"doi": "https://doi.org/10.9/elsewhere"},
+              "display_name": "A paper elsewhere", "publication_date": "2020-02-02", "cited_by_count": 3,
+              "authorships": [{"author": {"display_name": "B. Writer"}}],
+              "primary_location": {"source": {"display_name": "Other Journal"}}}]
+    seen = {}
+    monkeypatch.setattr(api.cite_graph, "find_work",
+                        lambda doi=None, pmid=None: seen.setdefault("doi", doi) and {"id": "W0", "cited_by_count": 42})
+    monkeypatch.setattr(api.cite_graph, "cited_by", lambda work, limit: works)
+    monkeypatch.setattr(api, "resolve_paper_ids", lambda keys, configs: (
+        {k: ("PubMed", 5) for k in keys if k == "doi:10.1234/test.0.5"}, []))
+
+    r = client.post("/v1/citations", json={"ref": "PubMed:3", "direction": "cited_by"}, headers=INTERNAL)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert seen["doi"] == "10.1234/test.0.3" and body["total_results"] == 42
+    assert body["seeds"][0]["title"] == "Paper 0-3"
+    first, second = body["results"]
+    assert first["title"] == "Paper 0-5" and first["in_index"] and first["ref"] == "PubMed:5"
+    assert first["cited_by_count"] == 9 and "Published" in first["labels"]
+    assert second["in_index"] is False and second["source"] == "External" and second["ref"] is None
+    assert second["journal"] == "Other Journal" and second["url"] == "https://doi.org/10.9/elsewhere"
+
+    assert client.post("/v1/citations", json={}, headers=INTERNAL).status_code == 422
+
+
+def test_citations_report_openalex_limits(backend, monkeypatch):
+    client, api = backend
+
+    def used_up(**_):
+        raise api.cite_graph.CitationsUnavailable("Citation lookups are used up for today.")
+    monkeypatch.setattr(api.cite_graph, "find_work", used_up)
+    r = client.post("/v1/citations", json={"doi": "10.1/x"}, headers=INTERNAL)
+    assert r.status_code == 503 and "used up" in r.json()["detail"]
+
+
+def test_library_needs_identifiers(backend):
+    client, _ = backend
+    r = client.post("/v1/library", json={"text": "no ids in here, only words"}, headers=INTERNAL)
+    assert r.status_code == 422 and "DOIs" in r.json()["detail"]
+    r = client.post("/v1/library", json={"ids": ["10.9999/not-indexed"]}, headers=INTERNAL)
+    assert r.status_code == 422 and "None of these papers" in r.json()["detail"]
+
+
+def test_library_groups_results_by_theme(backend, monkeypatch):
+    client, api = backend
+    monkeypatch.setattr(api, "resolve_paper_ids", lambda keys, configs: (
+        {"doi:10.1234/test.0.1": ("PubMed", 1), "pmid:2": ("PubMed", 2)}, ["doi:10.9/missing"]))
+    r = client.post("/v1/library", json={"text": "10.1234/test.0.1\nPMID: 2\n10.9/missing", "top_k": 6},
+                    headers=INTERNAL)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["not_found"] == ["doi:10.9/missing"] and len(body["themes"]) == 1
+    assert body["themes"][0]["size"] == 2 and len(body["results"]) == 6
+    assert all(p["theme"] == 0 for p in body["results"])
+    assert not {"PubMed:1", "PubMed:2"} & {p["ref"] for p in body["results"]}

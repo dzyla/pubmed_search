@@ -8,16 +8,16 @@ or paste an abstract; papers are ranked by meaning, not keywords.
 ## How it fits together
 
 ```
-                        ┌──────────────────────────── server (4 vCPU, 7.8 GB) ───────────────┐
+                        ┌──────────────────────────── server (CPU only) ────────────────────┐
  browser ──► nginx ──►  │ mss-ui      Streamlit (pbmss_app.py)  ── HTTP, internal key ──┐   │
                 │       │                                                               ▼   │
  REST / agents ─┴────►  │ mss-backend search_api.py: BGE model + binary FAISS index     │   │
    /search /v1/*        │             REST /search /v1/search /v1/stats /health  ◄──────┘   │
-   /mcp                 │             MCP  /mcp (search_papers, database_info)              │
+   /mcp                 │             MCP  /mcp (search, similar, library, citations)       │
                         │             hourly pickup of new .npy/.parquet files               │
                         └──────────────────────────────────────────────────────────────────┘
-                                         ▲ rsync nightly
- lab desktop (GPU): update_database/*.py download + embed new papers ──┘
+                                         ▲ new data files
+ GPU machine: update_database/*.py download + embed new papers ──────┘
 ```
 
 - **One backend process** owns the embedding model and the only copy of the index,
@@ -32,6 +32,7 @@ or paste an abstract; papers are ranked by meaning, not keywords.
 
 ```bash
 pip install -r requirements.txt
+cp config_mss.example.yaml config_mss.yaml           # then point the paths at your data
 export MSS_INTERNAL_KEY=dev-key MSS_CONFIG_PATH=./config_mss.yaml
 python search_api.py                                   # backend on 127.0.0.1:8080
 MSS_INTERNAL_KEY=dev-key streamlit run pbmss_app.py   # UI on :8501
@@ -45,8 +46,17 @@ curl -X POST https://manuscript-search.org/search \
   -H "X-API-Key: <key>" -H "Content-Type: application/json" \
   -d '{"query": "CRISPR base editing off-target effects", "top_k": 10}'
 ```
-Interactive docs: `/docs`. Results carry `url`, `links`, `labels` (Retracted, Review,
-Preprint, …), `date`, `pmid`, and for merged preprints `preprint_doi`.
+Interactive docs: `/docs`. Results carry `url`, `links`, `labels` (Published or Preprint,
+Retracted, Review, …), `date`, `pmid`, a `ref` for follow-up calls, and for merged
+preprints `preprint_doi`.
+
+| Endpoint | What |
+|---|---|
+| `POST /search` | Search by meaning (query, dates, sources) |
+| `POST /v1/similar` | Papers like 1–20 results (`refs`) |
+| `POST /v1/library` | Papers like your library: up to 500 DOIs / PMIDs / arXiv ids, or the `text` of a BibTeX, RIS or PubMed export. Grouped into up to four `themes`; your own papers are left out |
+| `POST /v1/citations` | Papers that cite a paper (`cited_by`) or that it cites (`references`), from OpenAlex, matched to the index |
+| `GET /v1/stats` | Database sizes and update dates |
 
 ## Use it from an AI agent (MCP)
 
@@ -62,20 +72,24 @@ Local stdio bridge (for clients without remote MCP support):
   "env": {"MSS_API_KEY": "<key>"}}}}
 ```
 Tools: `search_papers(query, top_k, start_date, end_date, sources, include_abstracts)`
-(sources: PubMed, BioRxiv, MedRxiv, arXiv, ClinicalTrials)
-and `database_info()`.
+(sources: PubMed, BioRxiv, MedRxiv, arXiv, ClinicalTrials, Preprints, OpenAlex, Grants),
+`find_similar(paper_refs, …)`, `find_papers_like(paper_ids, …)`,
+`get_citations(paper, direction)` and `database_info()`.
 
-## Deploy
+## Machine-specific settings
 
-```bash
-bash deploy/push.sh                         # on your machine: code only, archives the old code
-ssh root@server 'cd /srv/mss/app && bash deploy/install.sh'
-# back out:  bash deploy/install.sh --rollback
-```
-`install.sh` installs the two systemd units (`mss-backend`, `mss-ui`, with memory
-limits), creates `.env` with an internal key, replaces the old three services, and
-installs the nginx routes (API, MCP, rate limits, maintenance page) with automatic
-restore if `nginx -t` fails.
+Data locations and the contact address sent to public APIs are not stored in the
+code. They are read from environment variables, or from `~/.config/mss/paths.env`
+(`KEY=VALUE` lines) for scheduled jobs — see `mss_env.py`:
+
+| Variable | Used by | Default |
+|---|---|---|
+| `MSS_CONFIG_PATH` | `search_api.py` | `config_mss.yaml` next to the code |
+| `MSS_DATA_ROOT` | `update_database/`, `map/` | `./data` in the repository |
+| `MSS_MAP_WORK` | `map/` | `$MSS_DATA_ROOT/map_work` |
+| `MSS_PIPELINE_CONFIG` | PubMed and bioRxiv/medRxiv download scripts | `config_mss.yaml` in the repository |
+| `MSS_CONTACT_EMAIL` | Crossref / API polite-pool headers | none sent |
+| `MSS_RERANKER_DIR` | `reranker.py` | `./models/medcpt-ce-int8` in the repository |
 
 ## Repository map
 
@@ -87,10 +101,12 @@ restore if `nginx -t` fails.
 | `embedder.py` | In-process BGE query encoder |
 | `mcp_server.py`, `mcp_stdio.py` | MCP tools; stdio bridge |
 | `paper_links.py` | Links and labels per paper (shared by UI and API) |
+| `identifiers.py`, `aux_index.py` | Exact identifiers (gene symbols, variants, trial ids) and paper ids (DOI, PMID) -> indexed rows |
+| `cite_graph.py` | Citation links from OpenAlex |
 | `pbmss_app.py`, `ui_components.py`, `ui_data.py`, `backend_client.py`, `.streamlit/` | Web UI |
 | `ai_assistant.py` | Optional AI summary / chat with the user's own key: Google Gemini, Anthropic, OpenAI, OpenRouter, Groq, Mistral, DeepSeek |
-| `update_database/` | Ingestion scripts (run on the GPU desktop) |
+| `update_database/` | Ingestion scripts (download + embed on a GPU machine) |
 | `tools/rechunk_parquet.py` | Rewrite metadata parquet with small row groups |
 | `eval/` | Offline ranking evaluation |
-| `deploy/` | systemd, nginx, push/install scripts |
+| `mss_env.py` | Machine-specific settings (environment / `~/.config/mss/paths.env`) |
 | `docs/database_expansion.md` | Which databases to add next, and how |

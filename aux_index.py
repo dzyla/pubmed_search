@@ -32,6 +32,7 @@ class AuxIndex:
         self.superseded = None          # (stem_ids, rows) or None
         self.common = None              # sorted hashes of tokens dropped as too common
         self.meta: dict = {}
+        self._ids = None                # (hash, stem, row) paper-id lookup, memory-mapped
 
     def _complete_versions(self):
         return sorted(os.path.dirname(p) for p in glob.glob(os.path.join(self.dir, "*", "zzz_complete.json")))
@@ -52,6 +53,9 @@ class AuxIndex:
                 self.meta = json.load(f)
             common = os.path.join(path, "common.npy")
             self.common = np.load(common) if os.path.exists(common) else None
+            ids = os.path.join(path, "ids_hash.npy")
+            self._ids = ((load("ids_hash.npy"), load("ids_stem.npy"), load("ids_row.npy"))
+                         if os.path.exists(ids) else None)
             sup = os.path.join(path, "superseded_stem.npy")
             self.superseded = ((np.load(sup), np.load(os.path.join(path, "superseded_row.npy")))
                                if os.path.exists(sup) else None)
@@ -88,6 +92,17 @@ class AuxIndex:
         h = np.uint64(token_hash)
         i = int(np.searchsorted(self.common, h))
         return i < len(self.common) and self.common[i] == h
+
+    def paper_rows(self, key_hashes) -> tuple:
+        """(found, stem_ids, rows) for paper-id key hashes (identifiers.id_key), aligned with the input."""
+        h = np.asarray(key_hashes, dtype=np.uint64)
+        if self._ids is None or not len(h) or not len(self._ids[0]):
+            z = np.zeros(len(h), dtype=np.int64)
+            return np.zeros(len(h), dtype=bool), z, z
+        table, stems, rows = self._ids
+        idx = np.minimum(np.searchsorted(table, h), len(table) - 1)
+        found = np.asarray(table[idx]) == h
+        return found, np.asarray(stems[idx]).astype(np.int64), np.asarray(rows[idx]).astype(np.int64)
 
     def postings(self, token_hash: int):
         """(stem_ids, rows) for one token hash, or None if absent / too common."""

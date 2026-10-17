@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import time
 import json
@@ -17,9 +18,11 @@ from sentence_transformers import SentenceTransformer
 # ------------------------------------------------------------
 # PATHS & CONFIG
 # ------------------------------------------------------------
-DEST_DF_FOLDER = '/data/mss/pubmed26_parquet_files/' 
-DEST_EMBED_FOLDER = '/data/mss/pubmed26_update_embed/'
-COORDINATION_DIR = '/data/mss/pubmed26_update_coordination/'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+DEST_DF_FOLDER = mss_env.data_path('pubmed26_parquet_files', '')
+DEST_EMBED_FOLDER = mss_env.data_path('pubmed26_update_embed', '')
+COORDINATION_DIR = mss_env.data_path('pubmed26_update_coordination', '')
 
 TASK_QUEUE_FILE = os.path.join(COORDINATION_DIR, 'task_queue.json')
 MACHINE_STATUS_DIR = os.path.join(COORDINATION_DIR, 'machine_status/')

@@ -79,12 +79,14 @@ def backend_corpus(tmp_path_factory):
 def backend(backend_corpus, tmp_path_factory):
     """The backend app with the synthetic corpus as PubMed; one per test session (MCP can start once)."""
     import access
+    import alerts
     import embedder
     import search_api
 
     config, _ = backend_corpus
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(access, "DB_PATH", str(tmp_path_factory.mktemp("access") / "access.sqlite3"))
+        mp.setattr(alerts, "DB_PATH", str(tmp_path_factory.mktemp("alerts") / "alerts.db"))
         access.create_key("free", label="test", key="pub-key")
         mp.setattr(search_api, "API_KEYS_FILE", "/nonexistent/api_keys.txt")
         mp.setattr(search_api, "CONFIGS", [config, {}, {}, {}])

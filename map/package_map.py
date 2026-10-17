@@ -17,7 +17,7 @@ its 10 nearest reference papers (Hamming distance), and answers "what is here?"
 clicks with the reference papers nearest to a point. See map/prototype/ for how
 the layout itself was fitted (openTSNE on a 1.52M stratified sample).
 
-    python map/package_map.py [--work /data/.../umap_work] [--base <snowflake>]
+    python map/package_map.py [--work <map work dir>] [--base <data root>]
 """
 import argparse
 import json
@@ -32,12 +32,14 @@ from sklearn.cluster import KMeans
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "prototype"))
 from labels import terms  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
 
 SOURCE_NAMES = {"pubmed": "PubMed", "arxiv": "arXiv", "biorxiv": "BioRxiv", "medrxiv": "MedRxiv",
                 "clinicaltrials": "ClinicalTrials"}
 COLORS = {"PubMed": "#4d9be8", "arXiv": "#f28f2b", "BioRxiv": "#e05759", "MedRxiv": "#5ec962",
           "ClinicalTrials": "#c77ddb"}
-# Embedding folders on the desktop, per source (file stems are the .npy names)
+# Embedding folders under the data root, per source (file stems are the .npy names)
 EMBED_DIRS = {"PubMed": "pubmed26_update_embed", "arXiv": "arxiv_embed", "BioRxiv": "biorxiv_embed_binary",
               "MedRxiv": "medarxiv_embed_binary", "ClinicalTrials": "clinicaltrials_embed"}
 KEEP_VERSIONS = 2
@@ -99,10 +101,10 @@ def make_preview(tiles_dir: str, out_path: str, zoom: int = 3, field=(20, 16, 42
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--work", default="/data/umap_work")
+    ap.add_argument("--work", default=mss_env.map_work())
     ap.add_argument("--map-dir", default="map_gm_ex2")
     ap.add_argument("--ref", default="otsne_float_ex2")
-    ap.add_argument("--base", default="/data/mss")
+    ap.add_argument("--base", default=mss_env.data_root())
     args = ap.parse_args()
     t0 = time.time()
 

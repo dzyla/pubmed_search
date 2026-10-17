@@ -183,7 +183,7 @@ def test_fetch_crossref_filters_and_essoar_doi_filter(monkeypatch):
     assert rows[0]["journal"] == "ESS Open Archive"
     p = seen_params[0]
     assert p["filter"] == "type:posted-content,has-abstract:true,prefix:10.22541,from-index-date:2026-10-01"
-    assert p["mailto"] == pp.MAILTO and p["rows"] == 1000
+    assert p.get("mailto") == (pp.MAILTO or None) and p["rows"] == 1000   # mailto only when configured
 
 
 def test_resolve_pmid_dois_batches(monkeypatch):

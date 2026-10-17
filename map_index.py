@@ -1,5 +1,5 @@
 """
-Server-side reader for the paper map (built on the desktop by
+Server-side reader for the paper map (built offline by
 map/package_map.py and shipped with the aux indexes):
 
 - places papers and queries on the map: the geometric median of the

@@ -29,7 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import int8_codes as ic  # noqa: E402
 
-ROOT = "/data/mss"
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+ROOT = mss_env.data_root()
 # Source -> (embeddings dir, data dir, combined parquet or None); same layout as build_aux_indexes.py.
 # Small sources first so they are searchable with int8 early in a full run.
 SOURCES = {

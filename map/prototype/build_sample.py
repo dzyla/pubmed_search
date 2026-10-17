@@ -1,4 +1,4 @@
-"""Step 1: draw a stratified sample of stored 384-bit codes + metadata (read-only on H:).
+"""Step 1: draw a stratified sample of stored 384-bit codes + metadata (read-only on the data root).
 
 Output (WORK dir):
   sample_codes.npy   (N, 48) uint8  stored packed codes
@@ -7,6 +7,7 @@ Output (WORK dir):
 """
 import glob
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,8 +15,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-ROOT = "/data/mss"
-WORK = "/data/umap_work"
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import ROOT, WORK  # noqa: E402
 os.makedirs(WORK, exist_ok=True)
 RNG = np.random.default_rng(0)
 

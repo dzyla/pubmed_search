@@ -4,7 +4,7 @@ rows without decoding whole files. Row order and content are unchanged, so the
 alignment with the embedding .npy files is preserved. Writes to a temp file,
 verifies row count + a sample of rows, then atomically replaces the original.
 
-Run where the data lives (lab desktop before sync, or the server in a quiet
+Run where the data lives (the ingestion machine before copying, or the server in a quiet
 hour — it is I/O-bound, single-threaded, and needs ~1 GB RAM for bioRxiv):
 
     python tools/rechunk_parquet.py --row-group-size 2000 FILE.parquet [FILE ...]

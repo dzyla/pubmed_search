@@ -59,7 +59,16 @@ async def _post_similar(**kwargs) -> dict:
     return await _post("/v1/similar", kwargs)
 
 
-mcp = build_mcp(search=_post_search, stats=_get_stats, similar=_post_similar)
+async def _post_library(**kwargs) -> dict:
+    return await _post("/v1/library", kwargs)
+
+
+async def _post_citations(**kwargs) -> dict:
+    return await _post("/v1/citations", kwargs)
+
+
+mcp = build_mcp(search=_post_search, stats=_get_stats, similar=_post_similar,
+                library=_post_library, citations=_post_citations)
 
 if __name__ == "__main__":
     mcp.run()   # stdio

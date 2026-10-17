@@ -29,16 +29,17 @@ def test_arxiv_links():
 
 def test_badges_from_publication_types():
     row = {"source": "PubMed", "pub_type": "Journal Article; Systematic Review; Review; Meta-Analysis"}
-    assert pl.badges(row) == ["Meta-analysis", "Systematic review"]
-    assert pl.badges({"source": "PubMed", "pub_type": "Journal Article; Retracted Publication"}) == ["Retracted"]
-    assert pl.badges({"source": "PubMed", "title": "RETRACTED: Something"}) == ["Retracted"]
+    assert pl.badges(row) == ["Published", "Meta-analysis", "Systematic review"]
+    assert pl.badges({"source": "PubMed", "pub_type": "Journal Article; Retracted Publication"}) == [
+        "Retracted", "Published"]
+    assert pl.badges({"source": "PubMed", "title": "RETRACTED: Something"}) == ["Retracted", "Published"]
     assert pl.badges({"source": "MedRxiv", "published_doi": "NA"}) == ["Preprint"]
 
 
 def test_nan_values_are_ignored():
     row = {"source": "PubMed", "doi": float("nan"), "pmid": float("nan"), "pub_type": float("nan")}
     assert pl.build_links(row) == []
-    assert pl.badges(row) == []
+    assert pl.badges(row) == ["Published"]
     assert pl.year_of({"date": "2021-05-01"}) == 2021
 
 
@@ -87,3 +88,13 @@ def test_pubmed_parser_takes_the_articles_own_doi():
     assert article_doi(ET.fromstring(xml)) == "10.1897/1551-5028(2002)021<1423:AFVOTS>2.0.CO;2"
     no_own = xml.replace('<ArticleId IdType="doi">10.1897/1551-5028(2002)021&lt;1423:AFVOTS&gt;2.0.CO;2</ArticleId>', "")
     assert article_doi(ET.fromstring(no_own)) == ""          # never a cited paper's DOI
+
+
+def test_every_paper_says_published_or_preprint():
+    assert pl.badges({"source": "PubMed", "pub_type": "Journal Article"}) == ["Published"]
+    assert pl.badges({"source": "PubMed", "pub_type": "Preprint"}) == ["Preprint"]
+    assert pl.badges({"source": "arXiv", "doi": "https://arxiv.org/abs/2606.04390"}) == ["Preprint"]
+    assert pl.badges({"source": "OpenAlex", "pub_type": "Conference abstract"}) == ["Conference abstract"]
+    assert pl.badges({"source": "OpenAlex", "pub_type": "Journal Article"}) == ["Published"]
+    assert pl.badges({"source": "PubMed", "preprint_doi": "10.1101/1"}) == ["Published", "Has preprint"]
+    assert pl.publication_status({"source": "ClinicalTrials", "nct_id": "NCT1"}) == ""

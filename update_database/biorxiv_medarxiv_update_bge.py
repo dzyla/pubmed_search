@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import shutil
@@ -20,7 +21,9 @@ from tqdm import tqdm
 # -----------------------------------------------------------------------------
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 BATCH_SIZE = 1024  # BGE is small, we can increase batch size
-CONFIG_PATH = "~/pubmed_search/snowflake_code/config_mss.yaml"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+CONFIG_PATH = mss_env.pipeline_config()
 
 # -----------------------------------------------------------------------------
 # 1. SETUP & CONFIG LOADING

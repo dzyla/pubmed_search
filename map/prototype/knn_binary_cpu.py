@@ -1,6 +1,7 @@
 """Exact Hamming kNN graph (k=90) of the stored codes with faiss IndexBinaryFlat on CPU."""
-import time, numpy as np, faiss
-W = "/data/umap_work"
+import sys, time, numpy as np, faiss
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import WORK as W  # noqa: E402
 C = np.load(f"{W}/sample_codes.npy"); faiss.omp_set_num_threads(22)
 ix = faiss.IndexBinaryFlat(384); ix.add(C)
 t = time.time(); D, I = ix.search(C, 91); dt = time.time() - t

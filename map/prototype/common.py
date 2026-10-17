@@ -1,8 +1,14 @@
 """Shared paths, split and quality metrics (torch/GPU)."""
+import os
+import sys
+
 import numpy as np
 
-WORK = "/data/umap_work"
-SCRATCH = "/tmp/claude-1000/-mnt-h-pubmed-semantic-search/1f9b73a6-18aa-4d42-81e2-9f8f4fde4940/scratchpad/umap_study"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import mss_env  # noqa: E402  (machine-specific paths; see mss_env.py)
+ROOT = mss_env.data_root()
+WORK = mss_env.map_work()
+SCRATCH = os.path.join(WORK, "study")
 N = 1_520_000
 
 

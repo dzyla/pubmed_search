@@ -1,4 +1,4 @@
-"""Step 6: project ALL stored codes (~50M); read .npy from H: (read-only).
+"""Step 6: project ALL stored codes (~50M); read .npy from the data root (read-only).
   python project_all.py <mapper.pt | knn:<ref_name>> <out_dir>
   knn:<ref>  = geometric median of the 10 Hamming-nearest reference docs (GPU matmul on ±1)
 Writes <out_dir>/coords_<source>.npy  float32 (n,2), row-aligned with the concatenation of that
@@ -16,8 +16,7 @@ import torch
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from mappers import Mapper, unpack_gpu
-
-ROOT = "/data/mss"
+from common import ROOT  # noqa: E402
 SRC = {
     "pubmed": sorted(glob.glob(f"{ROOT}/pubmed26_update_embed/*.npy")),
     "arxiv": sorted(glob.glob(f"{ROOT}/arxiv_embed/*.npy")),
@@ -39,7 +38,7 @@ def geomed(nb, iters=10):
 def main(mpath, out):
     os.makedirs(out, exist_ok=True)
     if mpath.startswith("knn:"):
-        WORK = "/data/umap_work"
+        from common import WORK
         R = unpack_gpu(torch.from_numpy(np.load(f"{WORK}/sample_codes.npy")).cuda())
         RY = torch.from_numpy(np.load(f"{WORK}/ref_{mpath[4:]}.npy")).cuda()
 

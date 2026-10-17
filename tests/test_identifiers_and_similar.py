@@ -129,3 +129,52 @@ def test_common_words_do_not_boost_small_sources():
     big = searcher(45_000_000, Aux({2: 600}, common=[1]))      # PubMed dropped '2d' when building
     assert big.common_tokens({"2d": 1, "tmem175": 2}) == {"2d"}
     assert small.common_tokens({"2d": 1, "tmem175": 2}) == set()
+
+
+def test_paper_ids_from_exports():
+    from identifiers import parse_paper_ids
+    text = """@article{a, doi = {10.1038/S41586-020-2012-7}, pmid = {32015507}, year = {2020}, pages = {270}}
+DO  - 10.1126/science.abf9302.
+PMID- 33637720
+https://pubmed.ncbi.nlm.nih.gov/12345678/
+arXiv:2106.09685v2
+31234567
+1999
+"""
+    assert parse_paper_ids(text) == [
+        "doi:10.1038/s41586-020-2012-7", "pmid:32015507", "doi:10.1126/science.abf9302", "pmid:33637720",
+        "pmid:12345678", "arxiv:2106.09685", "pmid:31234567"]
+
+
+def test_library_resolves_ids_to_newest_rows_and_leaves_them_out(pubmed_like, monkeypatch):
+    base, config = pubmed_like
+    monkeypatch.setitem(bai.SOURCES, "PubMed", ("pm_embed", "pm_data", None, ["title", "abstract"]))
+    bai.build_source("PubMed", str(base), workers=2)
+    configs = [config] + [None] * 7          # _SOURCE_NAMES order: PubMed first
+    found, missing = search_logic.resolve_paper_ids(
+        ["doi:10.1/p.1.7", "pmid:4", "pmid:2050", "doi:10.9/nope"], configs)
+    assert found == {"doi:10.1/p.1.7": ("PubMed", 107), "pmid:4": ("PubMed", 209),   # newest version of PMID 4
+                     "pmid:2050": ("PubMed", 250)}
+    assert missing == ["doi:10.9/nope"]
+
+    df, seeds, themes, packed = search_logic.library_search(list(found.values()), configs, [config], 9)
+    assert len(df) == 9 and "theme" in df and packed.shape == (1, EMB_BYTES)
+    assert not set(df["corpus_id"]) & {107, 209, 250}
+    assert sum(t["size"] for t in themes) == 3 and themes[0]["label"].startswith("Paper ")
+
+
+def test_library_themes_split_distinct_fields_only():
+    rng = np.random.default_rng(3)
+    centres = rng.standard_normal((3, 384))
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+
+    def field(c, n, spread):
+        v = c + spread * rng.standard_normal((n, 384)) / np.sqrt(384)
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+    three = np.vstack([field(centres[0], 12, 0.6), field(centres[1], 8, 0.6), field(centres[2], 5, 0.6)])
+    labels = search_logic.library_themes(three)
+    field_of = np.repeat([0, 1, 2], [12, 8, 5])
+    # Fields may be split into sub-themes, but a theme never mixes two fields.
+    assert len(set(labels.tolist())) >= 3
+    assert all(len(set(field_of[labels == t].tolist())) == 1 for t in set(labels.tolist()))
+    assert search_logic.library_themes(three[:5]).tolist() == [0] * 5       # too few papers to split
