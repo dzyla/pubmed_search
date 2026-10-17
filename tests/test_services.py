@@ -271,14 +271,34 @@ def test_alert_api_round_trip(backend, monkeypatch):
     body = r.json()
     token = body["token"]
     assert body["feed_url"].endswith(f"/v1/alerts/{token}/feed.xml")
-    info = client.get(f"/v1/alerts/{token}").json()
+    info = client.get(f"/v1/alerts/{token}", headers=INTERNAL).json()
     assert info["query"] == "some topic" and info["sources"] == ["PubMed"] and "threshold" not in info
-    feed = client.get(f"/v1/alerts/{token}/feed.xml")
+    feed = client.get(f"/v1/alerts/{token}/feed.xml")                 # the feed link alone reads the feed
     assert feed.status_code == 200 and feed.headers["content-type"].startswith("application/rss+xml")
     ET.fromstring(feed.text)
-    assert client.delete(f"/v1/alerts/{token}").status_code == 200
-    assert client.get(f"/v1/alerts/{token}").status_code == 404
-    assert client.get("/v1/alerts/short").status_code == 404
+    # ... but cannot read the settings or delete the alert: that is the website's job
+    assert client.get(f"/v1/alerts/{token}").status_code == 403
+    assert client.delete(f"/v1/alerts/{token}").status_code == 403
+    assert client.delete(f"/v1/alerts/{token}", headers=PUBLIC).status_code == 403
+    assert client.delete(f"/v1/alerts/{token}", headers=INTERNAL).status_code == 200
+    assert client.get(f"/v1/alerts/{token}", headers=INTERNAL).status_code == 404
+    assert client.get("/v1/alerts/short", headers=INTERNAL).status_code == 404
+
+
+def test_alert_api_limits_each_visitor(backend, monkeypatch):
+    client, search_api = backend
+    import alerts
+    monkeypatch.setattr(alerts, "MAX_NEW_PER_CLIENT_DAY", 2)
+    body = {"query": "some topic", "sources": ["PubMed"], "sensitivity": "broad"}
+    calls = []
+    real = search_api.alert_calibration
+    monkeypatch.setattr(search_api, "alert_calibration", lambda *a: calls.append(1) or real(*a))
+    for _ in range(2):
+        assert client.post("/v1/alerts", json=body, headers={**INTERNAL, "X-Client-IP": "203.0.113.7"}).status_code == 200
+    r = client.post("/v1/alerts", json=body, headers={**INTERNAL, "X-Client-IP": "203.0.113.7"})
+    assert r.status_code == 429 and "a day" in r.json()["detail"]
+    assert len(calls) == 2                                               # refused before any index work
+    assert client.post("/v1/alerts", json=body, headers={**INTERNAL, "X-Client-IP": "203.0.113.8"}).status_code == 200
 
 
 # ---------------------------------------------------------------------------

@@ -1061,10 +1061,17 @@ def _run_alerts():
 
 
 @app.post("/v1/alerts", include_in_schema=False)
-async def create_alert(req: AlertRequest, caller: Caller = Depends(_caller)):
+async def create_alert(req: AlertRequest, request: Request, caller: Caller = Depends(_caller)):
     """Saves a search; new papers that would rank in its top N appear in a private RSS feed (UI only)."""
     if caller.tier != "internal":
         raise HTTPException(status_code=403, detail="Alerts are created from the website.")
+    client = request.headers.get("x-client-ip", "")[:64]   # the visitor, as the UI saw them (nginx X-Real-IP)
+    try:   # before the calibration, so over-limit requests cost nothing
+        await asyncio.to_thread(alerts.check_quota, client)
+    except alerts.AlertLimit as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     sources = list(req.sources or DEFAULT_SOURCES)
     await _acquire_slot()
     try:
@@ -1079,7 +1086,9 @@ async def create_alert(req: AlertRequest, caller: Caller = Depends(_caller)):
         raise HTTPException(status_code=422, detail="Nothing matches this search yet, so it cannot be saved.")
     try:
         token = await asyncio.to_thread(alerts.create, req.query, sources, query_float, cal["threshold"],
-                                        req.sensitivity)
+                                        req.sensitivity, client)
+    except alerts.AlertLimit as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from None
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
     # seed the feed with matching papers from the last weeks
@@ -1094,8 +1103,16 @@ async def create_alert(req: AlertRequest, caller: Caller = Depends(_caller)):
             "per_month_estimate": round(cal["last_year"] / 12, 1), "seeded": len(rows)}
 
 
+def _require_ui(caller: Caller):
+    """Reading an alert's settings and deleting it are for the website; the feed link alone
+    (which ends up in third-party feed readers) only reads the feed."""
+    if caller.tier != "internal":
+        raise HTTPException(status_code=403, detail="Manage alerts from the website.")
+
+
 @app.get("/v1/alerts/{token}", include_in_schema=False)
-async def get_alert(token: str):
+async def get_alert(token: str, caller: Caller = Depends(_caller)):
+    _require_ui(caller)
     if not _TOKEN_RE.match(token):
         raise HTTPException(status_code=404, detail="No such alert.")
     alert = await asyncio.to_thread(alerts.get, token)
@@ -1108,7 +1125,8 @@ async def get_alert(token: str):
 
 
 @app.delete("/v1/alerts/{token}", include_in_schema=False)
-async def delete_alert(token: str):
+async def delete_alert(token: str, caller: Caller = Depends(_caller)):
+    _require_ui(caller)
     if not _TOKEN_RE.match(token) or not await asyncio.to_thread(alerts.delete, token):
         raise HTTPException(status_code=404, detail="No such alert.")
     return {"deleted": True}

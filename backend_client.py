@@ -130,12 +130,13 @@ def map_info() -> dict:
 # Saved-search alerts (private RSS feeds; the token is the only key)
 # ---------------------------------------------------------------------------
 
-def create_alert(query: str, sources, sensitivity: str) -> dict:
-    """{token, feed_url, per_month_estimate, seeded, sensitivity}; raises BackendError."""
+def create_alert(query: str, sources, sensitivity: str, client_ip: str = "") -> dict:
+    """{token, feed_url, per_month_estimate, seeded, sensitivity}; raises BackendError.
+    client_ip: the visitor's address, for the per-visitor alert limits."""
     try:
         r = requests.post(f"{BACKEND_URL}/v1/alerts", timeout=SEARCH_TIMEOUT_S,
                           json={"query": query, "sources": list(sources or []) or None, "sensitivity": sensitivity},
-                          headers={"X-API-Key": INTERNAL_KEY})
+                          headers={"X-API-Key": INTERNAL_KEY, "X-Client-IP": client_ip or ""})
     except requests.exceptions.RequestException:
         raise BackendError("The alert service is not reachable right now; try again in a minute.") from None
     if r.status_code != 200:
@@ -146,7 +147,7 @@ def create_alert(query: str, sources, sensitivity: str) -> dict:
 def get_alert(token: str):
     """The alert with its latest papers, None if it no longer exists; raises BackendError when unreachable."""
     try:
-        r = requests.get(f"{BACKEND_URL}/v1/alerts/{token}", timeout=15)
+        r = requests.get(f"{BACKEND_URL}/v1/alerts/{token}", timeout=15, headers={"X-API-Key": INTERNAL_KEY})
     except requests.exceptions.RequestException:
         raise BackendError("The alert service is not reachable right now.") from None
     if r.status_code == 404:
@@ -158,6 +159,7 @@ def get_alert(token: str):
 
 def delete_alert(token: str) -> bool:
     try:
-        return requests.delete(f"{BACKEND_URL}/v1/alerts/{token}", timeout=15).status_code in (200, 404)
+        return requests.delete(f"{BACKEND_URL}/v1/alerts/{token}", timeout=15,
+                               headers={"X-API-Key": INTERNAL_KEY}).status_code in (200, 404)
     except requests.exceptions.RequestException:
         return False

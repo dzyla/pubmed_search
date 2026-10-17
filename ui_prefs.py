@@ -232,6 +232,14 @@ _RSS_HELP = ("Each alert is a private RSS feed. Paste its link into a feed reade
              "share it only on purpose. Alerts nobody reads for 6 months are removed.")
 
 
+def _visitor_ip() -> str:
+    """The visitor's address as nginx passed it (X-Real-IP), for the per-visitor alert limits."""
+    try:
+        return st.context.headers.get("X-Real-Ip") or ""
+    except Exception:
+        return ""
+
+
 def render_create_alert(query: str, sources):
     """'Create alert' popover for the current search."""
     with st.popover("Create alert", icon=":material/notifications:",
@@ -245,7 +253,7 @@ def render_create_alert(query: str, sources):
                 return
             try:
                 with st.spinner("Saving…"):
-                    res = backend_client.create_alert(query, sources, sens)
+                    res = backend_client.create_alert(query, sources, sens, _visitor_ip())
             except backend_client.BackendError as exc:
                 st.error(str(exc))
                 return

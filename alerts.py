@@ -16,9 +16,15 @@ How matching works
   (row ids may shift when the index is rebuilt; stored items do not).
 - New alerts are seeded with matching papers from the last SEED_DAYS days.
 
+Abuse limits: creating an alert costs a calibration (seconds of index work) and a row,
+so each visitor may keep MAX_ACTIVE_PER_CLIENT alerts and create MAX_NEW_PER_CLIENT_DAY a
+day, and the whole site MAX_NEW_PER_DAY a day (check_quota). A visitor is a salted hash of
+their address; the address itself is not stored.
+
 Storage: SQLite at MSS_ALERTS_DB (default alerts.db next to this file; *.db files are
 never deployed or committed). Alerts nobody read (feed or UI) for EXPIRE_DAYS are deleted.
 """
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +35,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import format_datetime
+from urllib.parse import quote_plus
 from xml.sax.saxutils import escape
 
 import numpy as np
@@ -48,11 +55,18 @@ MAX_ITEMS_PER_RUN = 30
 MAX_ITEMS_KEPT = 300
 EXPIRE_DAYS = 180
 MAX_ALERTS = 20000
+MAX_ACTIVE_PER_CLIENT = 25
+MAX_NEW_PER_CLIENT_DAY = 10
+MAX_NEW_PER_DAY = 500
 # 1: bar = lowest int8 score among the binary top N (far too low: true rank 100k-1.4M for
 #    N = 2,000); 2: rank-N int8 score in a re-scored pool of 4N (2026-10-16).
 CALIBRATION = 2
 
 _LOCK = threading.Lock()
+
+
+class AlertLimit(RuntimeError):
+    """A creation limit was reached (message is user-safe)."""
 
 
 def _db():
@@ -73,23 +87,61 @@ def _db():
     if "calibration" not in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}:
         conn.execute("ALTER TABLE alerts ADD COLUMN calibration INTEGER NOT NULL DEFAULT 1")
         conn.commit()
+    if "creator" not in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}:
+        conn.execute("ALTER TABLE alerts ADD COLUMN creator TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS alerts_by_creator ON alerts (creator, created)")
+        conn.commit()
     return conn
+
+
+def _creator(conn, client: str) -> str:
+    """Salted hash of a visitor's address ('' when unknown)."""
+    if not client:
+        return ""
+    row = conn.execute("SELECT value FROM state WHERE name='creator_salt'").fetchone()
+    if row is None:
+        conn.execute("INSERT OR IGNORE INTO state VALUES ('creator_salt', ?)", (secrets.token_hex(16),))
+        row = conn.execute("SELECT value FROM state WHERE name='creator_salt'").fetchone()
+    return hashlib.sha256((row[0] + client).encode()).hexdigest()[:24]
+
+
+def _check_quota(conn, creator: str):
+    day_ago = int(time.time()) - 86400
+    if conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] >= MAX_ALERTS:
+        raise RuntimeError("The alert service is full; please try again later.")
+    if conn.execute("SELECT COUNT(*) FROM alerts WHERE created >= ?", (day_ago,)).fetchone()[0] >= MAX_NEW_PER_DAY:
+        raise AlertLimit("Too many alerts were created today; please try again tomorrow.")
+    if not creator:
+        return
+    if conn.execute("SELECT COUNT(*) FROM alerts WHERE creator=?", (creator,)).fetchone()[0] >= MAX_ACTIVE_PER_CLIENT:
+        raise AlertLimit(f"You have {MAX_ACTIVE_PER_CLIENT} alerts already; delete one under Alerts first.")
+    if conn.execute("SELECT COUNT(*) FROM alerts WHERE creator=? AND created >= ?",
+                    (creator, day_ago)).fetchone()[0] >= MAX_NEW_PER_CLIENT_DAY:
+        raise AlertLimit(f"You can create {MAX_NEW_PER_CLIENT_DAY} alerts a day; please try again tomorrow.")
+
+
+def check_quota(client: str = ""):
+    """Raises AlertLimit (or RuntimeError when the service is full) if `client` may not create an alert now."""
+    with _db() as conn:
+        _check_quota(conn, _creator(conn, client))
 
 
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
 
-def create(query: str, sources: list, vec: np.ndarray, threshold: float, sensitivity: str) -> str:
+def create(query: str, sources: list, vec: np.ndarray, threshold: float, sensitivity: str,
+           client: str = "") -> str:
+    """Saves an alert for visitor `client` (their address); raises AlertLimit / RuntimeError over the limits."""
     token = secrets.token_urlsafe(18)
     now = int(time.time())
-    with _db() as conn:
-        if conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] >= MAX_ALERTS:
-            raise RuntimeError("The alert service is full; please try again later.")
+    with _LOCK, _db() as conn:
+        creator = _creator(conn, client)
+        _check_quota(conn, creator)
         conn.execute("INSERT INTO alerts (token, query, sources, vec, threshold, sensitivity, created, last_seen, "
-                     "calibration) VALUES (?,?,?,?,?,?,?,?,?)",
+                     "calibration, creator) VALUES (?,?,?,?,?,?,?,?,?,?)",
                      (token, query, json.dumps(list(sources)), np.asarray(vec, np.float32).tobytes(),
-                      float(threshold), sensitivity, now, now, CALIBRATION))
+                      float(threshold), sensitivity, now, now, CALIBRATION, creator))
     return token
 
 
@@ -197,7 +249,7 @@ def rss(token: str, feed_url: str, site_url: str) -> str:
     title = f"{alert['query'][:80]} · Manuscript Search"
     return ('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" '
             'xmlns:atom="http://www.w3.org/2005/Atom"><channel>'
-            f"<title>{escape(title)}</title><link>{escape(site_url)}/?q={escape(alert['query'][:500])}</link>"
+            f"<title>{escape(title)}</title><link>{escape(site_url)}/?q={escape(quote_plus(alert['query'][:500]))}</link>"
             f'<atom:link href="{escape(feed_url)}" rel="self" type="application/rss+xml"/>'
             f"<description>{escape('New papers matching: ' + alert['query'][:500])}</description>"
             f"<ttl>720</ttl>{''.join(entries)}</channel></rss>")

@@ -112,3 +112,38 @@ def test_alert_only_watches_its_databases(setup):
     alerts.run({"PubMed": searcher})
     assert alerts.items(token) == []
 
+
+
+def test_creation_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr(alerts, "DB_PATH", str(tmp_path / "alerts.db"))
+    monkeypatch.setattr(alerts, "MAX_ACTIVE_PER_CLIENT", 3)
+    monkeypatch.setattr(alerts, "MAX_NEW_PER_CLIENT_DAY", 2)
+    monkeypatch.setattr(alerts, "MAX_NEW_PER_DAY", 5)
+    q = np.ones(384, np.float32)
+    t1 = alerts.create("a", ["PubMed"], q, 0.5, "balanced", client="203.0.113.1")
+    alerts.create("b", ["PubMed"], q, 0.5, "balanced", client="203.0.113.1")
+    with pytest.raises(alerts.AlertLimit, match="a day"):                 # per visitor per day
+        alerts.check_quota("203.0.113.1")
+    with pytest.raises(alerts.AlertLimit):
+        alerts.create("c", ["PubMed"], q, 0.5, "balanced", client="203.0.113.1")
+    with alerts._db() as conn:                                            # a day later ...
+        conn.execute("UPDATE alerts SET created = created - 90000")
+    alerts.create("c", ["PubMed"], q, 0.5, "balanced", client="203.0.113.1")
+    with pytest.raises(alerts.AlertLimit, match="delete one"):            # ... the active cap still holds
+        alerts.check_quota("203.0.113.1")
+    alerts.delete(t1)
+    alerts.check_quota("203.0.113.1")
+    for i in range(4):                                                    # site-wide daily cap
+        alerts.create(f"o{i}", ["PubMed"], q, 0.5, "balanced", client=f"198.51.100.{i}")
+    with pytest.raises(alerts.AlertLimit, match="today"):
+        alerts.check_quota("198.51.100.99")
+    with alerts._db() as conn:                                            # addresses are not stored
+        creators = [r[0] for r in conn.execute("SELECT creator FROM alerts")]
+    assert creators and all("." not in c and len(c) == 24 for c in creators)
+
+
+def test_feed_link_encodes_the_query(tmp_path, monkeypatch):
+    monkeypatch.setattr(alerts, "DB_PATH", str(tmp_path / "alerts.db"))
+    token = alerts.create("T cells & B cells?", ["PubMed"], np.ones(384, np.float32), 0.5, "balanced")
+    channel = ET.fromstring(alerts.rss(token, "https://x/feed.xml", "https://x")).find("channel")
+    assert channel.find("link").text == "https://x/?q=T+cells+%26+B+cells%3F"
