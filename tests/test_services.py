@@ -102,7 +102,7 @@ def test_internal_errors_are_not_leaked(backend, monkeypatch):
     monkeypatch.setattr(search_api, "combined_search_orchestrator", boom)
     r = _search(client, query="something new")
     assert r.status_code == 500
-    assert "/root" not in r.text
+    assert "/srv/mss" not in r.text and "secret" not in r.text
 
 
 def test_busy_server_returns_503_with_retry_after(backend, monkeypatch):
