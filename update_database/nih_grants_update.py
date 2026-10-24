@@ -14,6 +14,10 @@ Bulk path: the ExPORTER yearly CSV zips (projects + abstracts, FY1985 onward,
 records per call, offset <= 14,999, ~1 call/s). The API is used only for fiscal
 years that have no ExPORTER file yet (the current FY) and for incremental runs
 (criteria.date_added; RePORTER loads new applications weekly, on Saturdays).
+RePORTER also back-fills date_added days after a load (a run on 2026-10-11 saw 0
+applications for 10-09..10-11, which later held 159), so incremental runs start
+LOOKBACK_DAYS before the last run; grants already indexed are only rewritten if
+their record changed.
 API queries that match more than 15,000 records are split by date_added range.
 
 One row per core project number (e.g. R01GM123456): RePORTER lists one
@@ -56,6 +60,7 @@ MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_ROWS = 25_000
 API_PAGE = 500
 API_MAX_RESULTS = 15_000       # offset <= 14,999
+LOOKBACK_DAYS = 30             # incremental runs re-read this many days before the last run
 REQUEST_GAP_S = 1.0            # RePORTER asks for at most ~1 request per second
 MIN_ABSTRACT_CHARS = 50
 API_FIELDS = ["ApplId", "SubprojectId", "FiscalYear", "ProjectNum", "CoreProjectNum", "ProjectTitle",
@@ -577,7 +582,8 @@ def main():
             since = args.since
         elif os.path.exists(state_path):
             with open(state_path) as f:
-                since = json.load(f)["last_run"]
+                last = date.fromisoformat(json.load(f)["last_run"])
+            since = (last - timedelta(days=LOOKBACK_DAYS)).isoformat()
         elif known:
             raise SystemExit("No state file; pass --since YYYY-MM-DD or --full.")
         else:

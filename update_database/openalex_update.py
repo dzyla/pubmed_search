@@ -17,6 +17,10 @@ articles and reviews with a DOI in CWTS "core" journals, not retracted
 Harvested month by month (cursor paging, 200 works per request) so a run can
 stop when the daily API allowance is used up and the next run resumes; each
 month is recorded in openalex_coordination/state.json once its rows are written.
+OpenAlex keeps adding works to past months for weeks, so every run also reads
+the last RECENT_MONTHS months again (~90k works, ~450 requests); works already
+indexed are skipped. (Filtering by when OpenAlex added a work, from_created_date,
+needs a paid plan.)
 Rows are embedded and written in chunks like the other sources:
 
     <base>/openalex_df/openalex_<n>.parquet + <base>/openalex_embed/openalex_<n>.npy
@@ -58,6 +62,7 @@ FIRST_YEAR = 1950
 MIN_WORDS = 80
 CHUNK_ROWS = 25_000
 RESERVE_REQUESTS = 25          # leave a little of the daily allowance unused
+RECENT_MONTHS = 3              # re-read every run (current month included)
 COLUMNS = ["record_id", "doi", "title", "authors", "date", "abstract", "journal", "pub_type", "pmcid", "url"]
 
 # Bump when the cleaning below changes: months harvested under an older version are
@@ -337,6 +342,7 @@ def main():
         all_months = list(months(args.first_year))
         todo = ([m for m in all_months if m[0] not in versions]                  # never harvested
                 + [m for m in all_months if versions.get(m[0], CLEANING_VERSION) < CLEANING_VERSION])
+        todo += [m for m in all_months[-RECENT_MONTHS:] if m not in todo]         # works added since
         for month, start, end in todo:
             works = fetch_month(session, key, start, end, args.max_requests, used)
             for w in works:
